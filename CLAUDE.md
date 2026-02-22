@@ -1,0 +1,31 @@
+## 개발 목표
+- 개발은 macOS에서, 실제 구동은 Ubuntu 24.04 환경에서 docker로 진행
+  - Metal 및 ROCm, DirectML 등으로 GPU 가속을 받을 수 있으면 더 좋음
+- 개발 언어는 Rust, Axum을 웹서버 엔진으로 하여 candle 또는 ort를 이용해 ONNX 모델을 로드하고 실행
+- 구동하려는 ONNX 모델은 Hugging Face에 올라와 있는 Supertone/supertonic-2 (TTS 생성 모델)
+  - 앱이 실행될 때 자동으로 모델을 다운로드/업데이트 받는다
+  - HTTP 서버와 병렬적으로 ONNX 모델 다운로드 및 로드 진행한다
+- /api/tts 엔드포인트로 HTTP 요청을 받으면 입력된 텍스트를 Supertonic 2 모델로 음성으로 변환하여 OPUS 압축하여 반환
+  - HTTP 요청을 할 때는 Authorization 헤더로 Bearer 토큰 입력이 필요
+  - 입력값은 `text/plain` 출력값은 `audio/opus`
+  - 오류는 다음과 같은 형태로 HTTP 상태 코드 반환
+    - 변환 성공하여 OPUS 스트림 반환하는 경우: `200`
+    - Bearer 토큰을 못 받았거나 잘못된 토큰인 경우: `401`
+    - 텍스트 값이 비어있는 경우: `400`
+    - 모델이 아직 로드되어 있지 않는 경우: `503`
+    - 그 외 오류 상황: `500`
+- /admin 페이지로 토큰 관리 가능
+  - 토큰 형태는 256비트 16진수
+  - 토큰 저장은 JSON 또는 YAML 등과 같은 형태로 파일로 관리
+  - 해당 페이지에서 revoke 가능해야 하고 토큰에 만료일을 지정할 수 있어야 함 (만료되지 않는 토큰 생성 가능)
+  - 실행 방법에 따라 샘플 토큰을 사용할 수 있어야 함 (`Authorization: Bearer SAMPLE_TOKEN`)
+    - 환경변수로 `ENABLE_SAMPLE_TOKEN`에 `1`을 설정
+  - 관리자 계정은 `SONICBOOM_ADMIN_ID` 및 `SONICBOOM_ADMIN_PW` 환경변수로 설정
+    - 기본값은 `admin` 및 `1234`
+    - 5번 연속으로 실패하면 해당 IP에서 로그인 차단, 어딘가에 이 상태를 저장할 필요는 없고 서버가 떠 있는 동안에만 하면 됨
+- / 페이지에서 테스트 해볼 수 있음
+  - 텍스트, 음성모델, 속도 등 선택 후 재생하는 기능
+  - /api/tts 에서 Referer가 자기 자신이면 Authorization 없이도 결과값 반환
+
+## 중요 사항
+- Git 커밋은 Claude가 하지 않는다.

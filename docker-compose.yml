@@ -1,0 +1,47 @@
+services:
+  sonicboom:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./models:/app/models
+      - ./tokens.json:/app/tokens.json
+    environment:
+      - PORT=3000
+      - RUST_LOG=info
+      - MODEL_CACHE_DIR=/app/models
+      - TOKEN_STORE_PATH=/app/tokens.json
+      # 관리자 계정 (기본값: admin / 1234)
+      # - SONICBOOM_ADMIN_ID=admin
+      # - SONICBOOM_ADMIN_PW=1234
+      # 샘플 토큰 활성화 (개발/테스트용)
+      # - ENABLE_SAMPLE_TOKEN=1
+    restart: unless-stopped
+
+  # GPU (CUDA) 버전
+  sonicboom-cuda:
+    build:
+      context: .
+      target: runtime-cuda
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./models:/app/models
+      - ./tokens.json:/app/tokens.json
+    environment:
+      - PORT=3000
+      - RUST_LOG=info
+      - MODEL_CACHE_DIR=/app/models
+      - TOKEN_STORE_PATH=/app/tokens.json
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - cuda
+    restart: unless-stopped
