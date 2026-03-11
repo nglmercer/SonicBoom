@@ -3,13 +3,13 @@ mod api;
 mod auth;
 mod config;
 mod error;
+mod logging;
 mod tts;
 mod web;
 
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_sessions::{MemoryStore, SessionManagerLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
@@ -25,14 +25,20 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            "SonicBoom=info,tower_http=debug".into()
-        }))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let config = Arc::new(AppConfig::from_env());
+
+    // Initialize logging
+    logging::init(
+        &config.log_dir,
+        &config.log_level,
+        config.log_to_file,
+        config.log_to_stdout,
+    );
+
+    // Log startup
+    logging::log_startup(config.port, &config.log_dir);
+
+    tracing::info!(admin_id = %config.admin_id, "Admin credentials loaded");
 
     let token_store = Arc::new(
         TokenStore::load(&config.token_store_path)

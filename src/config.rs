@@ -9,6 +9,11 @@ pub struct AppConfig {
     pub hf_token: Option<String>,
     pub inference_steps: usize,
     pub port: u16,
+    // Logging configuration
+    pub log_dir: String,
+    pub log_level: String,
+    pub log_to_file: bool,
+    pub log_to_stdout: bool,
 }
 
 impl AppConfig {
@@ -32,6 +37,15 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3000),
+            // Logging settings
+            log_dir: env::var("LOG_DIR").unwrap_or_else(|_| "./logs".to_string()),
+            log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
+            log_to_file: env::var("LOG_TO_FILE")
+                .map(|v| v == "1")
+                .unwrap_or(true),
+            log_to_stdout: env::var("LOG_TO_STDOUT")
+                .map(|v| v == "1")
+                .unwrap_or(true),
         }
     }
 }

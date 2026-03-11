@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 headers = "0.4"
 
 # Sessions (Admin panel)
@@ -37,11 +37,18 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "2"
 
-# Utilities
+# Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4"
 rand = "0.9"
 unicode-normalization = "0.1"
+
+[profile.release]
+lto = true
+opt-level = "z"
