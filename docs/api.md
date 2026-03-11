@@ -28,18 +28,20 @@ Synthesizes text to speech audio.
 |-----------|------|----------|---------|-------------|
 | `voice` | string | No | `M1` | Voice style (M1-M5, F1-F5) |
 | `lang` | string | No | `en` | Language code |
+| `format` | string | No | `opus` | Output format: `opus`, `wav`, or `mp3` |
 
 **Request Body:** Plain text string
 
-**Response:** Audio data (Opus/OGG format)
+**Response:** Audio data (format based on `format` parameter)
 
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/api/tts?voice=F1&lang=en" \
+# Get WAV output
+curl -X POST "http://localhost:3000/api/tts?voice=F1&format=wav" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Hello, world!" \
-  --output audio.ogg
+  --output audio.wav
 ```
 
 ---
@@ -108,6 +110,16 @@ SonicBoom uses Bearer token authentication. Include your API token in the `Autho
 -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
+### Optional Authentication
+
+For development or public APIs, you can disable authentication:
+
+```bash
+export SONICBOOM_AUTH_REQUIRED=0
+```
+
+When disabled, API requests work without any token.
+
 ### Getting a Token
 
 1. Access the admin panel at `/admin`
@@ -129,9 +141,41 @@ Then use `SAMPLE_TOKEN` for testing.
 
 ## Response Formats
 
+### Supported Formats
+
+SonicBoom supports multiple audio output formats:
+
+| Format | Content-Type | Description |
+|--------|--------------|-------------|
+| `opus` | `audio/opus` | Default Opus/OGG format (recommended) |
+| `wav` | `audio/wav` | WAV format (PCM 16-bit) |
+| `mp3` | `audio/mpeg` | MP3 format (currently falls back to WAV) |
+
+### Using Format Parameter
+
+**Original API:**
+
+```bash
+# Get WAV output
+curl -X POST "http://localhost:3000/api/tts?format=wav" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d "Hello, world!" \
+  --output audio.wav
+```
+
+**OpenAI API:**
+
+```bash
+curl -X POST http://localhost:3000/v1/audio/speech \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hello, world!", "voice": "alloy", "response_format": "wav"}' \
+  --output audio.wav
+```
+
 ### Success Response
 
-- **Content-Type:** `audio/opus`
+- **Content-Type:** `audio/opus`, `audio/wav`, or `audio/mpeg` (based on format)
 - **Body:** Raw audio data
 
 ### Error Response

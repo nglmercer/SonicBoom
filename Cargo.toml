@@ -21,9 +21,13 @@ tower-sessions = { version = "0.14", features = ["memory-store"] }
 ort = { version = "2.0.0-rc.11", features = ["coreml", "ndarray"] }
 ndarray = "0.17"
 
-# Audio encoding
+# Audio encoding/decoding
 opus = "0.3"
 ogg = "0.9"
+hound = "3.5"
+shine-rs = "0.1"
+flacenc = "0.5"
+symphonia = { version = "0.5", features = ["all"] }
 
 # HuggingFace model download
 reqwest = { version = "0.12", features = ["stream"] }
@@ -43,6 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # Utilities
+dotenvy = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4"

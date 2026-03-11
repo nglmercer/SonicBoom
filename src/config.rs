@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub log_level: String,
     pub log_to_file: bool,
     pub log_to_stdout: bool,
+    // Authentication configuration
+    pub auth_required: bool,
 }
 
 impl AppConfig {
@@ -45,6 +47,12 @@ impl AppConfig {
                 .unwrap_or(true),
             log_to_stdout: env::var("LOG_TO_STDOUT")
                 .map(|v| v == "1")
+                .unwrap_or(true),
+            // Authentication settings
+            // Set to false to allow API access without authentication
+            // Can be toggled via SONICBOOM_AUTH_REQUIRED=0 or SONICBOOM_AUTH_REQUIRED=false
+            auth_required: env::var("SONICBOOM_AUTH_REQUIRED")
+                .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(true),
         }
     }

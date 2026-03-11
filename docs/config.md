@@ -26,6 +26,7 @@ SonicBoom can be configured via environment variables.
 |----------|---------|-------------|
 | `TOKEN_STORE_PATH` | `./tokens.json` | Path to token storage file |
 | `ENABLE_SAMPLE_TOKEN` | `false` | Enable `SAMPLE_TOKEN` for testing |
+| `SONICBOOM_AUTH_REQUIRED` | `true` | Set to `0` or `false` to allow API access without authentication |
 
 ### Logging
 

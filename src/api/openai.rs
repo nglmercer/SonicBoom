@@ -138,6 +138,9 @@ pub async fn post_speech(
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
 
+    // Determine output format
+    let format = audio::AudioFormat::from_str(&request.response_format);
+
     let samples = tokio::task::spawn_blocking(move || {
         inference::synthesize(&model_handle, &text, &lang, &voice_name, inference_steps)
     })
@@ -145,21 +148,13 @@ pub async fn post_speech(
     .map_err(|e| AppError::Internal(e.to_string()))?
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let opus_bytes = audio::encode_opus(&samples, sample_rate)
+    let audio_bytes = audio::encode_audio(&samples, sample_rate, format)
         .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let content_type = match request.response_format.as_str() {
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "aac" => "audio/aac",
-        "flac" => "audio/flac",
-        _ => "audio/opus", // Default to opus
-    };
 
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        Body::from(opus_bytes),
+        [(header::CONTENT_TYPE, format.content_type())],
+        Body::from(audio_bytes),
     ))
 }
 

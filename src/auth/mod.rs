@@ -21,6 +21,11 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // If auth is not required, allow all requests
+        if !state.config.auth_required {
+            return Ok(AuthenticatedToken("__no_auth__".to_string()));
+        }
+
         // Allow without auth if Referer is same host
         if is_self_referer(parts) {
             return Ok(AuthenticatedToken("__self__".to_string()));

@@ -26,6 +26,9 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
     let config = Arc::new(AppConfig::from_env());
 
     // Initialize logging

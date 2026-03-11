@@ -17,6 +17,9 @@ use crate::{
 pub struct TtsQuery {
     pub voice: Option<String>,
     pub lang: Option<String>,
+    /// Output format: "opus", "wav", "mp3", or "flac"
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -107,6 +110,13 @@ pub async fn post_tts(
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
 
+    // Determine output format
+    let format = query
+        .format
+        .as_deref()
+        .map(audio::AudioFormat::from_str)
+        .unwrap_or(audio::AudioFormat::Opus);
+
     let samples = tokio::task::spawn_blocking(move || {
         inference::synthesize(&model_handle, &text, &lang, &voice_name, inference_steps)
     })
@@ -114,13 +124,13 @@ pub async fn post_tts(
     .map_err(|e| AppError::Internal(e.to_string()))?
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let opus_bytes = audio::encode_opus(&samples, sample_rate)
+    let audio_bytes = audio::encode_audio(&samples, sample_rate, format)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "audio/opus")],
-        Body::from(opus_bytes),
+        [(header::CONTENT_TYPE, format.content_type())],
+        Body::from(audio_bytes),
     )
         .into_response())
 }
