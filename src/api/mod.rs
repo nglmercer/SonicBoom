@@ -8,6 +8,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         // Original TTS API
         .route("/api/tts", post(tts::post_tts))
+        .route("/api/status", get(tts::get_status))
         // OpenAI-compatible endpoints
         .route("/v1/audio/speech", post(openai::post_speech))
         .route("/v1/models", get(openai::get_models))

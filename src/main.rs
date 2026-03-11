@@ -10,6 +10,7 @@ mod web;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_sessions::{MemoryStore, SessionManagerLayer};
+use tower_http::trace::{TraceLayer, DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, DefaultOnFailure};
 
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
@@ -75,7 +76,13 @@ async fn main() -> anyhow::Result<()> {
         .merge(api::router(app_state.clone()))
         .merge(admin::router(admin_state))
         .layer(session_layer)
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new())
+                .on_request(DefaultOnRequest::new())
+                .on_response(DefaultOnResponse::new())
+                .on_failure(DefaultOnFailure::new())
+        );
 
     let port = config.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

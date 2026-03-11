@@ -9,6 +9,10 @@ use crate::{tts::ModelStatus, AppState};
 // Load the HTML template at compile time
 const TEMPLATE: &str = include_str!("../../templates/index.html");
 
+pub async fn get_health() -> impl IntoResponse {
+    (StatusCode::OK, "OK")
+}
+
 pub async fn get_index(State(state): State<AppState>) -> Response {
     // Collect available voices
     let voices: Vec<String> = {

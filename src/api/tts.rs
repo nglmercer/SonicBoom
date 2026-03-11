@@ -4,7 +4,7 @@ use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
@@ -17,6 +17,46 @@ use crate::{
 pub struct TtsQuery {
     pub voice: Option<String>,
     pub lang: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StatusResponse {
+    pub status: String,
+    pub progress: Option<f32>,
+    pub error: Option<String>,
+}
+
+pub async fn get_status(State(state): State<crate::AppState>) -> impl IntoResponse {
+    let status = state.model_status.read().await;
+    let response = match &*status {
+        ModelStatus::Idle => StatusResponse {
+            status: "idle".to_string(),
+            progress: None,
+            error: None,
+        },
+        ModelStatus::Downloading { progress } => StatusResponse {
+            status: "downloading".to_string(),
+            progress: Some(*progress * 100.0),
+            error: None,
+        },
+        ModelStatus::Loading => StatusResponse {
+            status: "loading".to_string(),
+            progress: None,
+            error: None,
+        },
+        ModelStatus::Ready(_) => StatusResponse {
+            status: "ready".to_string(),
+            progress: None,
+            error: None,
+        },
+        ModelStatus::Failed(reason) => StatusResponse {
+            status: "failed".to_string(),
+            progress: None,
+            error: Some(reason.clone()),
+        },
+    };
+
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], serde_json::to_string(&response).unwrap())
 }
 
 pub async fn post_tts(

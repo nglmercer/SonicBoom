@@ -5,6 +5,7 @@ Complete API documentation for SonicBoom TTS server.
 ## Table of Contents
 
 - [Original TTS API](#original-tts-api)
+- [Web Routes](#web-routes)
 - [Authentication](#authentication)
 - [Response Formats](#response-formats)
 - [Error Codes](#error-codes)
@@ -53,10 +54,48 @@ Check if the model is loaded and ready.
 
 **Response:** JSON object with model status
 
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Model status: `idle`, `downloading`, `loading`, `ready`, or `failed` |
+| `progress` | float | Download progress percentage (only when downloading) |
+| `error` | string | Error message (only when failed) |
+
 **Example:**
 
 ```bash
 curl http://localhost:3000/api/status
+```
+
+**Example Response:**
+
+```json
+{
+  "status": "ready",
+  "progress": null,
+  "error": null
+}
+```
+
+---
+
+## Web Routes
+
+### Health Check
+
+Simple health check endpoint for load balancers and monitoring.
+
+**Endpoint:** `GET /health`
+
+**Authentication:** None
+
+**Response:** Plain text "OK" with status 200
+
+**Example:**
+
+```bash
+curl http://localhost:3000/health
 ```
 
 ---
