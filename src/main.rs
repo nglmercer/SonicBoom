@@ -15,13 +15,14 @@ use tower_http::trace::{TraceLayer, DefaultMakeSpan, DefaultOnRequest, DefaultOn
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
 use config::AppConfig;
-use tts::{download, model::ModelHandle, ModelStatus};
+use tts::{download, model::ModelHandle, queue::AudioManager, ModelStatus};
 
 #[derive(Clone)]
 pub struct AppState {
     pub model_status: Arc<RwLock<ModelStatus>>,
     pub token_store: Arc<TokenStore>,
     pub config: Arc<AppConfig>,
+    pub audio_manager: Arc<Option<AudioManager>>,
 }
 
 #[tokio::main]
@@ -56,10 +57,20 @@ async fn main() -> anyhow::Result<()> {
 
     let model_status = Arc::new(RwLock::new(ModelStatus::Idle));
 
+    // Initialize audio manager (rodio)
+    let audio_manager = match AudioManager::new() {
+        Ok(manager) => Arc::new(Some(manager)),
+        Err(e) => {
+            tracing::warn!("Failed to initialize audio manager: {}", e);
+            Arc::new(None)
+        }
+    };
+
     let app_state = AppState {
         model_status: Arc::clone(&model_status),
         token_store: Arc::clone(&token_store),
         config: Arc::clone(&config),
+        audio_manager,
     };
 
     let lockout = Arc::new(LoginAttemptTracker::default());

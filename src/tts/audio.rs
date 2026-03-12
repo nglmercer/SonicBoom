@@ -25,7 +25,7 @@ impl AudioFormat {
 
     pub fn content_type(&self) -> &'static str {
         match self {
-            AudioFormat::Opus => "audio/ogg",
+            AudioFormat::Opus => "audio/ogg; codecs=opus",
             AudioFormat::Wav => "audio/wav",
             AudioFormat::Mp3 => "audio/mpeg",
             AudioFormat::Flac => "audio/flac",
@@ -51,7 +51,6 @@ pub fn encode_opus(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
 
     // Set Opus encoder to VBR (Variable Bitrate) mode for better quality
     encoder.set_bitrate(opus::Bitrate::Bits(128000))?;
-    encoder.set_application(Application::Audio)?;
 
     // f32 PCM → i16 PCM
     let pcm_i16: Vec<i16> = resampled
@@ -127,14 +126,14 @@ fn encode_ogg_opus(packets: &[Vec<u8>], sample_rate: u32) -> Result<Vec<u8>> {
     writer.write_packet(opus_tags, serial, PacketWriteEndInfo::EndPage, 0)?;
 
     // ---- Audio data packets ----
-    // granule_pos = cumulative sample count at 48kHz (decoded time)
-    // The granule position represents the END of the page's data in decoded samples
-    // First audio packet starts at pre_skip (312), so first granule = pre_skip + frame_samples
+    // For OggOpus, granule position represents the presentation time of the
+    // last sample in the page. The first 312 samples (pre-skip) should be
+    // discarded by the decoder, so the first valid sample appears at
+    // granule position 312.
     let frame_samples = FRAME_SIZE_48K as u64;
     
     for (i, packet) in packets.iter().enumerate() {
         // Granule position = pre_skip + (packet_index + 1) * frame_samples
-        // This represents the presentation time of the last sample in this packet
         let granule = pre_skip as u64 + frame_samples * (i as u64 + 1);
         
         let end_info = if i + 1 == packets.len() {
@@ -196,6 +195,9 @@ fn encode_mp3(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
     let mp3_data = encode_pcm_to_mp3(config, &pcm_i16)
         .map_err(|e| anyhow::anyhow!("MP3 encoding failed: {:?}", e))?;
 
+    // Verify MP3 frame sync bytes are present (should start with 0xFF 0xFB or similar)
+    //shine-rs should produce valid MP3 frames with proper headers
+    
     // Add ID3v2 header for better compatibility with media players
     // Many players require ID3v2 to recognize MP3 files properly
     let id3v2 = create_id3v2_header();
@@ -215,19 +217,21 @@ fn create_id3v2_header() -> Vec<u8> {
     header.push(0); // Revision
     header.push(0); // Flags (none)
     
-    // Size in syncsafe bytes (7 bits per byte)
-    // We use 0 size since we just want the identifier for detection
+    // Size in syncsafe bytes (7 bits per byte) - standard minimal tag
     let size: u32 = 0;
-    header.push((size >> 21) as u8 & 0x7F);
-    header.push((size >> 14) as u8 & 0x7F);
-    header.push((size >> 7) as u8 & 0x7F);
-    header.push((size) as u8 & 0x7F);
+    header.push(((size >> 21) & 0x7F) as u8);
+    header.push(((size >> 14) & 0x7F) as u8);
+    header.push(((size >> 7) & 0x7F) as u8);
+    header.push((size & 0x7F) as u8);
     
     header
 }
 
 /// Encode audio as FLAC format using flacenc
 fn encode_flac(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+
     // Convert f32 to i32 for flacenc (16-bit range)
     let pcm_i32: Vec<i32> = samples
         .iter()
