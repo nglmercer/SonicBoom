@@ -2,3 +2,4 @@
 /models
 logs/**
 .env
+temp_audio/**
