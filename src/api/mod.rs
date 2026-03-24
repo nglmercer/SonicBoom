@@ -9,6 +9,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         // Original TTS API
         .route("/api/tts", post(tts::post_tts))
+        .route("/api/tts/play", post(tts::post_tts_and_play))
         .route("/api/status", get(tts::get_status))
         // Audio queue endpoints
         .route("/api/queue", post(queue::queue_audio))

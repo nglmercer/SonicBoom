@@ -6,12 +6,12 @@ A high-performance web server that generates Text-to-Speech (TTS) audio using th
 
 This README serves as an index to all SonicBoom documentation:
 
-| Document | Description |
-|----------|-------------|
-| [API Reference](docs/api.md) | Complete API documentation |
+| Document                                | Description                         |
+| --------------------------------------- | ----------------------------------- |
+| [API Reference](docs/api.md)            | Complete API documentation          |
 | [OpenAI-Compatible API](docs/openai.md) | OpenAI TTS API compatible endpoints |
-| [Admin Panel](docs/admin.md) | Admin panel guide |
-| [Configuration](docs/config.md) | Environment variables and settings |
+| [Admin Panel](docs/admin.md)            | Admin panel guide                   |
+| [Configuration](docs/config.md)         | Environment variables and settings  |
 
 ---
 
@@ -41,6 +41,7 @@ cargo run --release
 ```
 
 The server will:
+
 1. Start listening on port 3000
 2. Download the Supertonic 2 model (first run)
 3. Load the model
@@ -55,6 +56,7 @@ The server will:
 - **Token-Based Authentication** - API access control
 - **Admin Panel** - Web-based management interface
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI TTS
+- **Audio Queue System** - Play audio files directly on the server with queue management
 - **Session Management** - Secure admin sessions with lockout protection
 
 ---
@@ -63,36 +65,49 @@ The server will:
 
 ### Original TTS API
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/tts` | Generate TTS audio |
-| `GET` | `/api/status` | Check model status |
+| Method | Endpoint        | Description                   |
+| ------ | --------------- | ----------------------------- |
+| `POST` | `/api/tts`      | Generate TTS audio            |
+| `POST` | `/api/tts/play` | Synthesize and play on server |
+| `GET`  | `/api/status`   | Check model status            |
+
+### Audio Queue API
+
+| Method | Endpoint            | Description                   |
+| ------ | ------------------- | ----------------------------- |
+| `POST` | `/api/queue`        | Add file to playback queue    |
+| `POST` | `/api/queue/next`   | Play next item in queue       |
+| `POST` | `/api/queue/pause`  | Pause playback                |
+| `POST` | `/api/queue/resume` | Resume playback               |
+| `POST` | `/api/queue/stop`   | Stop playback and clear queue |
+| `POST` | `/api/queue/volume` | Set playback volume           |
+| `GET`  | `/api/queue/status` | Get current queue status      |
 
 ### OpenAI-Compatible API
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
+| Method | Endpoint           | Description                  |
+| ------ | ------------------ | ---------------------------- |
 | `POST` | `/v1/audio/speech` | Generate TTS (OpenAI format) |
-| `GET` | `/v1/models` | List models |
-| `GET` | `/v1/voices` | List voices |
+| `GET`  | `/v1/models`       | List models                  |
+| `GET`  | `/v1/voices`       | List voices                  |
 
 ### Admin Panel
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/admin` | Admin dashboard |
-| `POST` | `/admin/login` | Admin login |
-| `POST` | `/admin/logout` | Admin logout |
-| `GET` | `/admin/tokens` | List API tokens |
-| `POST` | `/admin/tokens` | Create new token |
-| `DELETE` | `/admin/tokens/:id` | Revoke token |
+| Method   | Endpoint            | Description      |
+| -------- | ------------------- | ---------------- |
+| `GET`    | `/admin`            | Admin dashboard  |
+| `POST`   | `/admin/login`      | Admin login      |
+| `POST`   | `/admin/logout`     | Admin logout     |
+| `GET`    | `/admin/tokens`     | List API tokens  |
+| `POST`   | `/admin/tokens`     | Create new token |
+| `DELETE` | `/admin/tokens/:id` | Revoke token     |
 
 ### Web Routes
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Home page |
-| `GET` | `/health` | Health check |
+| Method | Endpoint  | Description  |
+| ------ | --------- | ------------ |
+| `GET`  | `/`       | Home page    |
+| `GET`  | `/health` | Health check |
 
 ---
 
@@ -119,20 +134,20 @@ curl -X POST http://localhost:3000/v1/audio/speech \
 
 ## Technology Stack
 
-| Component | Technology |
-|-----------|------------|
-| Runtime | [Tokio](https://tokio.rs/) |
-| Web Framework | [Axum](https://github.com/tokio-rs/axum) |
-| ONNX Inference | [ORT](https://github.com/DBDi/ort) |
-| Audio Encoding | [Opus](https://opus-codec.org/) |
-| Serialization | [Serde](https://serde.rs/) |
-| Logging | [Tracing](https://tokio.rs/blog/tracing) |
+| Component      | Technology                               |
+| -------------- | ---------------------------------------- |
+| Runtime        | [Tokio](https://tokio.rs/)               |
+| Web Framework  | [Axum](https://github.com/tokio-rs/axum) |
+| ONNX Inference | [ORT](https://github.com/DBDi/ort)       |
+| Audio Encoding | [Opus](https://opus-codec.org/)          |
+| Serialization  | [Serde](https://serde.rs/)               |
+| Logging        | [Tracing](https://tokio.rs/blog/tracing) |
 
 ---
 
 ## Project Structure
 
-```
+```textplain
 SonicBoom/
 ├── src/
 │   ├── main.rs              # Application entry point
