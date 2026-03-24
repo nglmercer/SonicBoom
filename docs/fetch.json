@@ -1,0 +1,16 @@
+{
+  "params": {
+    "url": "http://localhost:3000/api/tts/play",
+    "method": "POST",
+    "query": {
+      "voice": "F1",
+      "lang": "en",
+      "play_now": "true"
+    },
+    "headers": {
+      "Authorization": "Bearer sk-your-token-here",
+      "Content-Type": "text/plain"
+    },
+    "body": "Hello from the generic fetch client!"
+  }
+}

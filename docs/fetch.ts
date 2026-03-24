@@ -21,7 +21,7 @@ export interface TtsPlayResponse {
 
 /**
  * Synthesizes text and plays it directly on the SonicBoom server's audio output.
- * 
+ *
  * @param baseUrl - The base URL of the SonicBoom server (e.g., 'http://localhost:3000')
  * @param token - Your API authorization token
  * @param text - The text to synthesize and play
@@ -32,22 +32,27 @@ export async function synthesizeAndPlay(
   baseUrl: string,
   token: string,
   text: string,
-  options: TtsPlayOptions = {}
+  options: TtsPlayOptions = {},
 ): Promise<TtsPlayResponse> {
   // Construct the query parameters
-  const params = new URLSearchParams();
-  if (options.voice) params.append('voice', options.voice);
-  if (options.lang) params.append('lang', options.lang);
-  if (options.playNow !== undefined) params.append('play_now', options.playNow.toString());
+  const params = new URLSearchParams(
+    Object.entries({
+      voice: options.voice,
+      lang: options.lang,
+      play_now: options.playNow,
+    })
+      .filter(([_, value]) => value !== undefined && value !== "")
+      .map(([key, value]) => [key, String(value)]),
+  );
 
-  const url = `${baseUrl.replace(/\/$/, '')}/api/tts/play?${params.toString()}`;
+  const url = `${baseUrl.replace(/\/$/, "")}/api/tts/play?${params.toString()}`;
 
   try {
     const response = await fetch(url, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'text/plain', // The body is raw text
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "text/plain", // The body is raw text
       },
       body: text,
     });
@@ -59,20 +64,24 @@ export async function synthesizeAndPlay(
 
     return await response.json();
   } catch (error) {
-    console.error('Failed to communicate with SonicBoom:', error);
+    console.error("Failed to communicate with SonicBoom:", error);
     throw error;
   }
 }
 
 // --- Usage Example ---
 
-const SONICBOOM_URL = 'http://localhost:3000';
-const MY_TOKEN = 'sk-your-token-here';
+const SONICBOOM_URL = "http://localhost:3000";
+const MY_TOKEN = "sk-your-token-here";
 
-synthesizeAndPlay(SONICBOOM_URL, MY_TOKEN, "Hello from the TypeScript client!", {
-  voice: 'F1',
-  playNow: true
-})
-.then(res => console.log('Playing:', res.id))
-.catch(err => console.error('Error:', err));
-
+synthesizeAndPlay(
+  SONICBOOM_URL,
+  MY_TOKEN,
+  "Hello from the TypeScript client!",
+  {
+    voice: "F1",
+    playNow: true,
+  },
+)
+  .then((res) => console.log("Playing:", res.id))
+  .catch((err) => console.error("Error:", err));
