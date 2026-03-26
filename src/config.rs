@@ -43,10 +43,10 @@ impl AppConfig {
             log_dir: env::var("LOG_DIR").unwrap_or_else(|_| "./logs".to_string()),
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
             log_to_file: env::var("LOG_TO_FILE")
-                .map(|v| v == "1")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(true),
             log_to_stdout: env::var("LOG_TO_STDOUT")
-                .map(|v| v == "1")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(true),
             // Authentication settings
             // Set to false to allow API access without authentication

@@ -65,7 +65,7 @@ pub fn init(
         let stdout_layer = fmt::layer()
             .with_target(true)
             .with_level(true)
-            .with_ansi(true)
+            .with_ansi(false)
             .with_timer(ShortTimer)
             .compact();
 
@@ -93,7 +93,7 @@ pub fn init(
         let stdout_layer = fmt::layer()
             .with_target(true)
             .with_level(true)
-            .with_ansi(true)
+            .with_ansi(false)
             .with_timer(ShortTimer)
             .compact();
 
