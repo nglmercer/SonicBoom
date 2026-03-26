@@ -237,6 +237,25 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                 match cmd {
                     AudioCommand::Enqueue { id, path } => {
                         queue.enqueue(AudioItem { id, path });
+                        
+                        // Auto-play if nothing is currently playing and queue is not paused
+                        if sink.is_none() && !queue.paused {
+                            if let Some(item) = queue.dequeue() {
+                                if item.path.exists() {
+                                    if let Ok(file) = File::open(&item.path) {
+                                        let reader = BufReader::new(file);
+                                        if let Ok(source) = Decoder::new(reader) {
+                                            if let Ok(new_sink) = Sink::try_new(&stream_handle) {
+                                                new_sink.set_volume(queue.volume());
+                                                new_sink.append(source);
+                                                sink = Some(new_sink);
+                                                queue.set_current(Some(item));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     AudioCommand::PlayNow { id, path } => {
                         queue.clear();

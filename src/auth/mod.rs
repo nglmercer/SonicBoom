@@ -5,10 +5,6 @@ use axum::{
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
 };
-use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
-    TypedHeader,
-};
 
 use crate::AppState;
 
@@ -31,12 +27,20 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
             return Ok(AuthenticatedToken("__self__".to_string()));
         }
 
-        let TypedHeader(Authorization(bearer)) =
-            TypedHeader::<Authorization<Bearer>>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let auth_header = parts.headers.get("authorization")
+            .or_else(|| parts.headers.get("Authorization"));
 
-        let token_value = bearer.token().to_string();
+        let token_value = match auth_header {
+            Some(header) => {
+                let s = header.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
+                if let Some(stripped) = s.strip_prefix("Bearer ") {
+                    stripped.to_string()
+                } else {
+                    s.to_string() // Allow token without Bearer prefix
+                }
+            }
+            None => return Err(StatusCode::UNAUTHORIZED),
+        };
 
         if state.config.enable_sample_token && token_value == "SAMPLE_TOKEN" {
             return Ok(AuthenticatedToken(token_value));

@@ -72,12 +72,6 @@ pub async fn queue_audio(
     } else {
         audio_manager.add_to_queue(id.clone(), path).await;
         
-        // Try to play next if nothing is playing
-        let status = audio_manager.status().await;
-        if !status.is_playing {
-            audio_manager.play_next().await;
-        }
-        
         Json(QueueResponse {
             success: true,
             message: "Added to queue".to_string(),

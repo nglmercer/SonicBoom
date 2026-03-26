@@ -213,12 +213,6 @@ pub async fn post_tts_and_play(
         audio_manager.play_now(id.clone(), path).await;
     } else {
         audio_manager.add_to_queue(id.clone(), path.clone()).await;
-        
-        // Auto-play if nothing is currently playing
-        let status = audio_manager.status().await;
-        if !status.is_playing {
-            audio_manager.play_next().await;
-        }
     }
 
     Ok((
