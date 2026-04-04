@@ -57,6 +57,12 @@ hex = "0.4"
 rand = "0.9"
 unicode-normalization = "0.1"
 
+# Tray icon (Cross-platform)
+tray-icon = "0.19"
+tao = "0.30"
+image = "0.25"
+open = "5.3"
+
 [profile.release]
 lto = true
 opt-level = "z"
