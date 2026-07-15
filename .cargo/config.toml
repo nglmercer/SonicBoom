@@ -1,3 +1,12 @@
-[env]
+# macOS development only: point pkg-config at Homebrew so native deps
+# (e.g. GTK for the `gui` feature) resolve. Scoped to Apple targets so
+# that cross-compiling to Linux (`x86_64-unknown-linux-gnu`) does not
+# inherit macOS Homebrew paths and break glib/gobject/pkg-config probing.
+[target.x86_64-apple-darwin.env]
 PKG_CONFIG_PATH = "/opt/homebrew/lib/pkgconfig"
+
+[target.aarch64-apple-darwin.env]
+PKG_CONFIG_PATH = "/opt/homebrew/lib/pkgconfig"
+
+[env]
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
