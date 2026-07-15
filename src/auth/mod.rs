@@ -36,7 +36,14 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
                     s.to_string() // Allow token without Bearer prefix
                 }
             }
-            None => return Err(StatusCode::UNAUTHORIZED),
+            None => {
+                // Per spec: requests to /api/tts from our own pages (Referer == Host)
+                // are allowed without Authorization (used by the web test UI).
+                if parts.uri.path() == "/api/tts" && referer_is_self(parts) {
+                    return Ok(AuthenticatedToken("__self_referer__".to_string()));
+                }
+                return Err(StatusCode::UNAUTHORIZED);
+            }
         };
 
         if state.config.enable_sample_token && token_value == "SAMPLE_TOKEN" {
@@ -49,6 +56,34 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
             Err(StatusCode::UNAUTHORIZED)
         }
     }
+}
+
+/// Returns true when the `Referer` host matches the `Host` header, meaning the
+/// request originated from our own web UI. Used to allow unauthenticated
+/// `/api/tts` requests coming from the built-in test page.
+fn referer_is_self(parts: &Parts) -> bool {
+    let Some(host) = parts.headers.get("host").and_then(|h| h.to_str().ok()) else {
+        return false;
+    };
+    let Some(referer) = parts
+        .headers
+        .get("referer")
+        .or_else(|| parts.headers.get("Referer"))
+        .and_then(|h| h.to_str().ok())
+    else {
+        return false;
+    };
+
+    // Extract host[:port] from the Referer (drop scheme and path).
+    let after_scheme = referer.split_once("://").map(|(_, r)| r).unwrap_or(referer);
+    let referer_host = after_scheme.split('/').next().unwrap_or("");
+    if referer_host.is_empty() {
+        return false;
+    }
+
+    // Compare exactly, but tolerate a missing port on either side.
+    host == referer_host
+        || host.split(':').next() == referer_host.split(':').next()
 }
 
 

@@ -226,11 +226,12 @@ pub async fn post_tts_and_play(
 
     std::fs::write(&path, audio_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Add to queue or play now
+    // Register temp file for cleanup after playback, then add to queue
+    audio_manager.register_temp(path.clone()).await;
     if play_now {
         audio_manager.play_now(id.clone(), path).await;
     } else {
-        audio_manager.add_to_queue(id.clone(), path.clone()).await;
+        audio_manager.add_to_queue(id.clone(), path).await;
     }
 
     Ok((

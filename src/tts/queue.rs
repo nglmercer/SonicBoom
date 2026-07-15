@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rodio::{Decoder, OutputStream, Sink};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -68,6 +68,11 @@ impl AudioQueue {
         self.paused = paused;
     }
 
+    /// Check if playback is paused
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
     /// Set volume
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
@@ -108,6 +113,8 @@ pub enum AudioCommand {
     Stop,
     /// Set volume
     SetVolume(f32),
+    /// Register a temp file for cleanup after playback
+    RegisterTemp { path: PathBuf },
     /// Get status (returns sender for response)
     GetStatus(oneshot::Sender<QueueStatus>),
 }
@@ -172,6 +179,13 @@ impl AudioManager {
         let _ = self.command_tx.send(AudioCommand::SetVolume(volume)).await;
     }
 
+    /// Register a temporary file for automatic cleanup after playback completes.
+    /// Temp files (e.g., WAV files synthesized for local playback) are tracked
+    /// and deleted once they have finished playing to prevent disk space leaks.
+    pub async fn register_temp(&self, path: PathBuf) {
+        let _ = self.command_tx.send(AudioCommand::RegisterTemp { path }).await;
+    }
+
     /// Get queue status
     pub async fn status(&self) -> QueueStatus {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -199,6 +213,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
 
     let mut queue = AudioQueue::new();
     let mut sink: Option<Sink> = None;
+    let mut temp_files: HashSet<PathBuf> = HashSet::new();
 
     // Runtime for async operations
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -212,10 +227,9 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
             && s.empty()
             && !s.is_paused()
         {
-            // Playback finished
-            let current_id = queue.current.as_ref().map(|c| c.id.clone());
-            if let Some(_id) = current_id {
-                // Playback ended, could signal here if needed
+            // Playback finished — clean up temp file if registered
+            if let Some(current_item) = queue.current() {
+                cleanup_temp_file(current_item.path(), &mut temp_files);
             }
             queue.set_current(None);
             sink = None;
@@ -247,7 +261,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
 
                         // Auto-play if nothing is currently playing and queue is not paused
                         if sink.is_none()
-                            && !queue.paused
+                            && !queue.is_paused()
                             && let Some(item) = queue.dequeue()
                             && item.path.exists()
                             && let Ok(file) = File::open(&item.path)
@@ -331,6 +345,9 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                         }
                         queue.set_volume(vol);
                     }
+                    AudioCommand::RegisterTemp { path } => {
+                        temp_files.insert(path);
+                    }
                     AudioCommand::GetStatus(tx) => {
                         let is_playing = sink
                             .as_ref()
@@ -364,4 +381,14 @@ pub struct QueueStatus {
     pub is_playing: bool,
     pub is_paused: bool,
     pub volume: f32,
+}
+
+/// Attempts to delete a temporary audio file after use.
+/// Tracks the set of temp files so each one is only deleted once.
+fn cleanup_temp_file(path: &std::path::Path, temp_files: &mut HashSet<PathBuf>) {
+    if temp_files.remove(path) {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::debug!("Failed to remove temp file '{path:?}': {e}");
+        }
+    }
 }

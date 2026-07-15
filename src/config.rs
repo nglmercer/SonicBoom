@@ -26,16 +26,10 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Self {
-        let admin_pw = env::var("SONICBOOM_ADMIN_PW").unwrap_or_else(|_| {
-            // Generate a random password if none is set
-            use rand::RngCore;
-            let mut bytes = [0u8; 16];
-            rand::rng().fill_bytes(&mut bytes);
-            let pw = hex::encode(bytes);
-            eprintln!("WARNING: SONICBOOM_ADMIN_PW not set. Generated random password: {pw}");
-            eprintln!("Please set SONICBOOM_ADMIN_PW in your environment or .env file.");
-            pw
-        });
+        // Default password is "1234" per specification. Set SONICBOOM_ADMIN_PW
+        // to override (recommended for production deployments).
+        let admin_pw =
+            env::var("SONICBOOM_ADMIN_PW").unwrap_or_else(|_| "1234".to_string());
 
         Self {
             admin_id: env::var("SONICBOOM_ADMIN_ID").unwrap_or_else(|_| "admin".to_string()),

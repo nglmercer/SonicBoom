@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ort::session::Session;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Mutex};
+use std::collections::HashMap;
 
 use crate::tts::{download::ModelPaths, text::TextProcessor};
 
@@ -79,13 +79,19 @@ pub struct VoiceStyle {
 // ============================================================================
 
 pub struct ModelHandle {
-    pub duration_predictor: Mutex<Session>,
-    pub text_encoder: Mutex<Session>,
-    pub vector_estimator: Mutex<Session>,
-    pub vocoder: Mutex<Session>,
+    pub sessions: std::sync::Mutex<Sessions>,
     pub text_processor: TextProcessor,
     pub voice_styles: HashMap<String, VoiceStyle>,
     pub config: TtsConfig,
+}
+
+/// Holds all ONNX sessions together so they can be locked as a unit.
+/// This prevents deadlocks and avoids contention between sessions during sequential inference.
+pub struct Sessions {
+    pub duration_predictor: Session,
+    pub text_encoder: Session,
+    pub vector_estimator: Session,
+    pub vocoder: Session,
 }
 
 impl ModelHandle {
@@ -115,10 +121,12 @@ impl ModelHandle {
     pub fn load(paths: &ModelPaths) -> Result<Self> {
         tracing::info!("Loading ONNX sessions...");
 
-        let duration_predictor = Mutex::new(build_session(&paths.duration_predictor)?);
-        let text_encoder = Mutex::new(build_session(&paths.text_encoder)?);
-        let vector_estimator = Mutex::new(build_session(&paths.vector_estimator)?);
-        let vocoder = Mutex::new(build_session(&paths.vocoder)?);
+        let sessions = std::sync::Mutex::new(Sessions {
+            duration_predictor: build_session(&paths.duration_predictor)?,
+            text_encoder: build_session(&paths.text_encoder)?,
+            vector_estimator: build_session(&paths.vector_estimator)?,
+            vocoder: build_session(&paths.vocoder)?,
+        });
 
         let text_processor = TextProcessor::load(&paths.unicode_indexer)?;
 
@@ -160,10 +168,7 @@ impl ModelHandle {
         );
 
         Ok(Self {
-            duration_predictor,
-            text_encoder,
-            vector_estimator,
-            vocoder,
+            sessions,
             text_processor,
             voice_styles,
             config,

@@ -10,10 +10,13 @@ mod logging;
 mod tts;
 mod web;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
-use tower_http::trace::{
-    DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
+use tower_http::{
+    timeout::TimeoutLayer,
+    trace::{
+        DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
+    },
 };
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 
@@ -30,7 +33,38 @@ pub struct AppState {
     pub audio_manager: Arc<Option<AudioManager>>,
 }
 
+/// Load environment, validate config and initialize logging.
+fn init_runtime() -> Arc<AppConfig> {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
+    let config = Arc::new(AppConfig::from_env());
+
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        eprintln!("Configuration error: {e}");
+        std::process::exit(1);
+    }
+
+    // Initialize logging
+    logging::init(
+        &config.log_dir,
+        &config.log_level,
+        config.log_to_file,
+        config.log_to_stdout,
+    );
+
+    // Log startup
+    logging::log_startup(config.port, &config.log_dir);
+
+    tracing::info!(admin_id = %config.admin_id, "Admin credentials loaded");
+
+    config
+}
+
+#[cfg(feature = "gui")]
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+#[cfg(feature = "gui")]
 use tray_icon::{
     TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -61,6 +95,21 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!(admin_id = %config.admin_id, "Admin credentials loaded");
 
+    #[cfg(feature = "gui")]
+    {
+        return run_gui(config);
+    }
+
+    #[cfg(not(feature = "gui"))]
+    {
+        // --- Start the Tokio server on the current thread ---
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(run_server(config))
+    }
+}
+
+#[cfg(feature = "gui")]
+fn run_gui(config: Arc<AppConfig>) -> anyhow::Result<()> {
     // --- Start the Tokio server on a dedicated background thread ---
     // This prevents the tao event loop and the tokio runtime from blocking each other.
     let config_clone = Arc::clone(&config);
@@ -193,11 +242,14 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     let session_store = MemoryStore::default();
     let session_layer = SessionManagerLayer::new(session_store);
 
+    let request_timeout = config.request_timeout_secs;
+
     let app = axum::Router::new()
         .merge(web::router(app_state.clone()))
         .merge(api::router(app_state.clone()))
         .merge(admin::router(admin_state))
         .layer(session_layer)
+        .layer(TimeoutLayer::new(Duration::from_secs(request_timeout)))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new())
@@ -247,11 +299,40 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
 
     tracing::info!("Listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    // Graceful shutdown on Ctrl+C / SIGTERM
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
 
+    tracing::info!("Server shut down gracefully.");
     Ok(())
+}
+
+/// Waits for Ctrl+C or SIGTERM signal to trigger graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => tracing::info!("Received Ctrl+C, shutting down..."),
+        () = terminate => tracing::info!("Received SIGTERM, shutting down..."),
+    }
 }

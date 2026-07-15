@@ -3,22 +3,28 @@ name = "SonicBoom"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Headless server build (default). Enable `gui` for the desktop tray icon.
+default = []
+# Desktop system tray (tao/tray-icon). Only relevant on macOS/Windows/Linux desktops.
+gui = ["dep:tray-icon", "dep:tao", "dep:image", "dep:open"]
+# Apple Silicon CoreML acceleration for ONNX inference.
+coreml = ["ort/coreml"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
 # Web server
 axum = { version = "0.8", features = ["macros"] }
-axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["trace", "cors"] }
-headers = "0.4"
+tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
 
 # Sessions (Admin panel)
 tower-sessions = { version = "0.14", features = ["memory-store"] }
 
 # ONNX inference
-ort = { version = "2.0.0-rc.11", features = ["coreml", "ndarray"] }
+ort = { version = "2.0.0-rc.11", features = ["ndarray"] }
 ndarray = "0.17"
 
 # Audio encoding/decoding
@@ -27,9 +33,8 @@ ogg = "0.9"
 hound = "3.5"
 shine-rs = "0.1"
 flacenc = "0.5"
-symphonia = { version = "0.5", features = ["all"] }
 
-# Audio playback
+# Audio playback (server-side queue)
 rodio = "0.19"
 
 # HuggingFace model download
@@ -44,6 +49,9 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "2"
 
+# Constant-time comparison (admin credential checks)
+constant_time_eq = "0.3"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -57,12 +65,12 @@ hex = "0.4"
 rand = "0.9"
 unicode-normalization = "0.1"
 
-# Tray icon (Cross-platform)
-tray-icon = "0.19"
-tao = "0.30"
-image = "0.25"
-open = "5.3"
+# Tray icon (Desktop GUI only — gated behind the `gui` feature)
+tray-icon = { version = "0.19", optional = true }
+tao = { version = "0.30", optional = true }
+image = { version = "0.25", optional = true }
+open = { version = "5.3", optional = true }
 
 [profile.release]
 lto = true
-opt-level = "z"
+opt-level = 3

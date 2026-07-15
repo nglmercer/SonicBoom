@@ -5,6 +5,16 @@ use rand::Rng;
 
 use crate::tts::model::{ModelHandle, VoiceStyle};
 
+/// Lock the model sessions for the duration of inference.
+/// Since the flow-matching pipeline is inherently sequential (each step depends on
+/// the previous output), acquiring a single lock for the whole chunk avoids lock
+/// churn and eliminates any risk of deadlocks between the per-session mutexes.
+macro_rules! lock_sessions {
+    ($model:expr) => {
+        $model.sessions.lock()
+    };
+}
+
 pub fn synthesize(
     model: &ModelHandle,
     text: &str,
@@ -91,10 +101,12 @@ fn synthesize_chunk(
     let (_, ttl1, ttl2) = style.style_ttl_dims;
     let style_ttl = Array3::<f32>::from_shape_vec((1, ttl1, ttl2), style.style_ttl.clone())?;
 
+    // Lock sessions for entire chunk — inference is strictly sequential
+    let mut sessions = lock_sessions!(model).map_err(|e| anyhow!("Session lock poisoned: {e}"))?;
+
     // 1. Duration predictor → duration (seconds)
     let duration_sec: f32 = {
-        let mut session = model.duration_predictor.lock().unwrap();
-        let outputs = session.run(ort::inputs![
+        let outputs = sessions.duration_predictor.run(ort::inputs![
             "text_ids"  => Tensor::from_array(text_ids.clone())?,
             "style_dp"  => Tensor::from_array(style_dp.clone())?,
             "text_mask" => Tensor::from_array(text_mask.clone())?,
@@ -112,8 +124,7 @@ fn synthesize_chunk(
 
     // 2. Text encoder
     let (text_emb_dims, text_emb_vec): (Vec<usize>, Vec<f32>) = {
-        let mut session = model.text_encoder.lock().unwrap();
-        let outputs = session.run(ort::inputs![
+        let outputs = sessions.text_encoder.run(ort::inputs![
             "text_ids"  => Tensor::from_array(text_ids.clone())?,
             "style_ttl" => Tensor::from_array(style_ttl.clone())?,
             "text_mask" => Tensor::from_array(text_mask.clone())?,
@@ -148,8 +159,7 @@ fn synthesize_chunk(
         let current_step_arr = Array::from_elem(1, step as f32);
 
         let (vel_dims, vel_vec): (Vec<usize>, Vec<f32>) = {
-            let mut session = model.vector_estimator.lock().unwrap();
-            let outputs = session.run(ort::inputs![
+            let outputs = sessions.vector_estimator.run(ort::inputs![
                 "noisy_latent" => Tensor::from_array(xt.clone())?,
                 "text_emb"     => Tensor::from_array(text_emb.clone())?,
                 "style_ttl"    => Tensor::from_array(style_ttl.clone())?,
@@ -169,8 +179,7 @@ fn synthesize_chunk(
 
     // 5. Vocoder
     let wav_vec: Vec<f32> = {
-        let mut session = model.vocoder.lock().unwrap();
-        let outputs = session.run(ort::inputs![
+        let outputs = sessions.vocoder.run(ort::inputs![
             "latent" => Tensor::from_array(xt)?,
         ])?;
         let (_, data) = outputs["wav_tts"].try_extract_tensor::<f32>()?;
