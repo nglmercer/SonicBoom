@@ -105,7 +105,7 @@ fn synthesize_chunk(
 
     // latent_len = ceil(duration_sec * sample_rate / chunk_size)
     let wav_len = (duration_sec * sample_rate) as usize;
-    let latent_len = ((wav_len + chunk_size - 1) / chunk_size).max(1);
+    let latent_len = wav_len.div_ceil(chunk_size).max(1);
 
     // latent_mask: [1, 1, latent_len]
     let latent_mask = Array3::<f32>::ones((1, 1, latent_len));

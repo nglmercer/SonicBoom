@@ -70,12 +70,10 @@ fn map_voice(openai_voice: &str) -> String {
             // Check if it's a valid voice name (M1-M5 or F1-F5)
             if (openai_voice.starts_with('M') || openai_voice.starts_with('F'))
                 && openai_voice.len() == 2
+                && let Ok(num) = openai_voice[1..].parse::<u32>()
+                && (1..=5).contains(&num)
             {
-                if let Some(num) = openai_voice[1..].parse::<u32>().ok() {
-                    if (1..=5).contains(&num) {
-                        return openai_voice.to_string();
-                    }
-                }
+                return openai_voice.to_string();
             }
             "M1".to_string()
         }

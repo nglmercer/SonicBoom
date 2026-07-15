@@ -31,10 +31,8 @@ static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 /// Initialize the logging system
 pub fn init(log_dir: &str, log_level: &str, log_to_file: bool, log_to_stdout: bool) {
     // Create log directory if it doesn't exist
-    if log_to_file {
-        if let Err(e) = std::fs::create_dir_all(log_dir) {
-            eprintln!("Warning: Could not create log directory: {}", e);
-        }
+    if log_to_file && let Err(e) = std::fs::create_dir_all(log_dir) {
+        eprintln!("Warning: Could not create log directory: {}", e);
     }
 
     // Build the env filter - include tower_http at trace level for request logging

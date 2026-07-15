@@ -208,29 +208,30 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
 
     loop {
         // Check if current playback finished
-        if let Some(s) = &sink {
-            if s.empty() && !s.is_paused() {
-                // Playback finished
-                let current_id = queue.current.as_ref().map(|c| c.id.clone());
-                if let Some(_id) = current_id {
-                    // Playback ended, could signal here if needed
-                }
-                queue.set_current(None);
-                sink = None;
+        if let Some(s) = &sink
+            && s.empty()
+            && !s.is_paused()
+        {
+            // Playback finished
+            let current_id = queue.current.as_ref().map(|c| c.id.clone());
+            if let Some(_id) = current_id {
+                // Playback ended, could signal here if needed
+            }
+            queue.set_current(None);
+            sink = None;
 
-                // Try to play next
-                if let Some(item) = queue.dequeue() {
-                    if let Ok(file) = File::open(&item.path) {
-                        let reader = BufReader::new(file);
-                        if let Ok(source) = Decoder::new(reader) {
-                            if let Ok(new_sink) = Sink::try_new(&stream_handle) {
-                                new_sink.set_volume(queue.volume());
-                                new_sink.append(source);
-                                sink = Some(new_sink);
-                                queue.set_current(Some(item));
-                            }
-                        }
-                    }
+            // Try to play next
+            if let Some(item) = queue.dequeue()
+                && let Ok(file) = File::open(&item.path)
+            {
+                let reader = BufReader::new(file);
+                if let Ok(source) = Decoder::new(reader)
+                    && let Ok(new_sink) = Sink::try_new(&stream_handle)
+                {
+                    new_sink.set_volume(queue.volume());
+                    new_sink.append(source);
+                    sink = Some(new_sink);
+                    queue.set_current(Some(item));
                 }
             }
         }
@@ -245,21 +246,20 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                         queue.enqueue(AudioItem { id, path });
 
                         // Auto-play if nothing is currently playing and queue is not paused
-                        if sink.is_none() && !queue.paused {
-                            if let Some(item) = queue.dequeue() {
-                                if item.path.exists() {
-                                    if let Ok(file) = File::open(&item.path) {
-                                        let reader = BufReader::new(file);
-                                        if let Ok(source) = Decoder::new(reader) {
-                                            if let Ok(new_sink) = Sink::try_new(&stream_handle) {
-                                                new_sink.set_volume(queue.volume());
-                                                new_sink.append(source);
-                                                sink = Some(new_sink);
-                                                queue.set_current(Some(item));
-                                            }
-                                        }
-                                    }
-                                }
+                        if sink.is_none()
+                            && !queue.paused
+                            && let Some(item) = queue.dequeue()
+                            && item.path.exists()
+                            && let Ok(file) = File::open(&item.path)
+                        {
+                            let reader = BufReader::new(file);
+                            if let Ok(source) = Decoder::new(reader)
+                                && let Ok(new_sink) = Sink::try_new(&stream_handle)
+                            {
+                                new_sink.set_volume(queue.volume());
+                                new_sink.append(source);
+                                sink = Some(new_sink);
+                                queue.set_current(Some(item));
                             }
                         }
                     }
@@ -269,17 +269,17 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                             s.stop();
                         }
 
-                        if path.exists() {
-                            if let Ok(file) = File::open(&path) {
-                                let reader = BufReader::new(file);
-                                if let Ok(source) = Decoder::new(reader) {
-                                    if let Ok(new_sink) = Sink::try_new(&stream_handle) {
-                                        new_sink.set_volume(queue.volume());
-                                        new_sink.append(source);
-                                        sink = Some(new_sink);
-                                        queue.set_current(Some(AudioItem { id, path }));
-                                    }
-                                }
+                        if path.exists()
+                            && let Ok(file) = File::open(&path)
+                        {
+                            let reader = BufReader::new(file);
+                            if let Ok(source) = Decoder::new(reader)
+                                && let Ok(new_sink) = Sink::try_new(&stream_handle)
+                            {
+                                new_sink.set_volume(queue.volume());
+                                new_sink.append(source);
+                                sink = Some(new_sink);
+                                queue.set_current(Some(AudioItem { id, path }));
                             }
                         }
                     }
@@ -288,19 +288,18 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                             s.stop();
                         }
 
-                        if let Some(item) = queue.dequeue() {
-                            if item.path.exists() {
-                                if let Ok(file) = File::open(&item.path) {
-                                    let reader = BufReader::new(file);
-                                    if let Ok(source) = Decoder::new(reader) {
-                                        if let Ok(new_sink) = Sink::try_new(&stream_handle) {
-                                            new_sink.set_volume(queue.volume());
-                                            new_sink.append(source);
-                                            sink = Some(new_sink);
-                                            queue.set_current(Some(item));
-                                        }
-                                    }
-                                }
+                        if let Some(item) = queue.dequeue()
+                            && item.path.exists()
+                            && let Ok(file) = File::open(&item.path)
+                        {
+                            let reader = BufReader::new(file);
+                            if let Ok(source) = Decoder::new(reader)
+                                && let Ok(new_sink) = Sink::try_new(&stream_handle)
+                            {
+                                new_sink.set_volume(queue.volume());
+                                new_sink.append(source);
+                                sink = Some(new_sink);
+                                queue.set_current(Some(item));
                             }
                         } else {
                             queue.set_current(None);
