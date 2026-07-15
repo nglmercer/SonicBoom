@@ -5,71 +5,185 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SonicBoom TTS</title>
 <style>
+  :root {
+    --primary: #0071e3;
+    --primary-hover: #0077ed;
+    --primary-disabled: #b0b8c1;
+    --bg-main: #f5f5f7;
+    --bg-card: #ffffff;
+    --text-primary: #1d1d1f;
+    --text-secondary: #6e6e73;
+    --border: #d2d2d7;
+    --border-focus: #0071e3;
+    --error: #d70015;
+    --warning-bg: #fff3cd;
+    --warning-text: #856404;
+    --transition-speed: 0.2s;
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
+
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #f5f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg-main);
+    color: var(--text-primary);
     min-height: 100vh;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 1rem;
+    padding: 1.5rem;
   }
+
   .card {
-    background: #fff;
+    background: var(--bg-card);
     border-radius: 16px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-    padding: 2rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.05);
+    padding: 2.25rem;
     width: 100%;
     max-width: 560px;
+    transition: transform var(--transition-speed);
   }
-  h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #1d1d1f; }
-  label { display: block; font-size: 0.85rem; color: #6e6e73; margin-bottom: 0.3rem; }
+
+  h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    margin-bottom: 1.5rem;
+    letter-spacing: -0.5px;
+  }
+
+  .form-group {
+    margin-bottom: 1.25rem;
+  }
+
+  label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 0.4rem;
+  }
+
   textarea, select {
     width: 100%;
-    padding: 0.65rem 0.8rem;
-    border: 1px solid #d2d2d7;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 1rem;
     background: #fafafa;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color var(--transition-speed), background-color var(--transition-speed), box-shadow var(--transition-speed);
   }
-  textarea:focus, select:focus { border-color: #0071e3; background: #fff; }
-  textarea { resize: vertical; min-height: 120px; font-family: inherit; }
-  .row { display: flex; gap: 1rem; margin-top: 1rem; }
+
+  textarea:focus, select:focus {
+    border-color: var(--border-focus);
+    background: var(--bg-card);
+    box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15);
+  }
+
+  textarea {
+    resize: vertical;
+    min-height: 140px;
+    font-family: inherit;
+    line-height: 1.5;
+  }
+
+  .row {
+    display: flex;
+    gap: 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+
   .row .field { flex: 1; }
+
   button {
-    margin-top: 1.25rem;
     width: 100%;
-    padding: 0.75rem;
-    background: #0071e3;
+    padding: 0.85rem;
+    background: var(--primary);
     color: #fff;
     border: none;
     border-radius: 8px;
     font-size: 1rem;
+    font-weight: 600;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background-color var(--transition-speed), transform 0.1s ease;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
   }
-  button:hover:not(:disabled) { background: #0077ed; }
-  button:disabled { background: #b0b8c1; cursor: not-allowed; }
+
+  button:hover:not(:disabled) {
+    background: var(--primary-hover);
+  }
+
+  button:active:not(:disabled) {
+    transform: scale(0.99);
+  }
+
+  button:disabled {
+    background: var(--primary-disabled);
+    cursor: not-allowed;
+  }
+
+  /* Loading State Pulse */
+  button.loading {
+    animation: pulse 1.5s infinite ease-in-out;
+  }
+
+  @keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.75; }
+    100% { opacity: 1; }
+  }
+
   #status {
-    margin-top: 1rem;
+    margin-top: 1.25rem;
     font-size: 0.875rem;
-    color: #6e6e73;
+    color: var(--text-secondary);
     min-height: 1.2em;
     text-align: center;
+    font-weight: 500;
   }
-  #status.error { color: #d70015; }
-  audio { margin-top: 1rem; width: 100%; display: none; }
-  .model-status {
-    margin-bottom: 1rem;
-    padding: 0.6rem 0.8rem;
+
+  #status.error {
+    color: var(--error);
+  }
+
+  audio {
+    margin-top: 1.5rem;
+    width: 100%;
+    display: none;
     border-radius: 8px;
-    background: #fff3cd;
-    color: #856404;
+  }
+
+  .model-status {
+    margin-bottom: 1.5rem;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    background: var(--warning-bg);
+    color: var(--warning-text);
     font-size: 0.875rem;
+    font-weight: 500;
+    border: 1px solid rgba(133, 100, 4, 0.15);
     display: BLOCK_STATUS;
+  }
+
+  .footer {
+    margin-top: 1.75rem;
+    font-size: 0.75rem;
+    color: #aeaeb2;
+    text-align: center;
+  }
+
+  .footer a {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    transition: color var(--transition-speed);
+  }
+
+  .footer a:hover {
+    color: var(--text-secondary);
   }
 </style>
 </head>
@@ -78,8 +192,10 @@
   <h1>SonicBoom TTS</h1>
   <div class="model-status" id="modelStatus">STATUS_MSG</div>
 
-  <label for="text">Text</label>
-  <textarea id="text" placeholder="Enter text to convert to speech..."></textarea>
+  <div class="form-group">
+    <label for="text">Text Input</label>
+    <textarea id="text" placeholder="Enter text to convert to speech..."></textarea>
+  </div>
 
   <div class="row">
     <div class="field">
@@ -128,34 +244,52 @@
     </div>
   </div>
 
-  <button id="btn" onclick="synthesize()" BTN_DISABLED>Generate Speech</button>
+  <button id="btn" BTN_DISABLED>Generate Speech</button>
   <div id="status"></div>
   <audio id="player" controls></audio>
-  <p style="margin-top:1.5rem;font-size:0.75rem;color:#aeaeb2;text-align:center;">
-    Powered by <a href="https://huggingface.co/Supertone/supertonic-3" target="_blank" rel="noopener"
-       style="color:inherit;">Supertonic 3</a>
+
+  <p class="footer">
+    Powered by <a href="https://huggingface.co/Supertone/supertonic-3" target="_blank" rel="noopener">Supertonic 3</a>
   </p>
 </div>
 
 <script>
+// Backend-injected variable
 const MODEL_READY = MODEL_READY_JS;
 
+// DOM Cache
+const textInput = document.getElementById('text');
+const voiceSelect = document.getElementById('voice');
+const langSelect = document.getElementById('lang');
+const generateBtn = document.getElementById('btn');
+const statusDiv = document.getElementById('status');
+const audioPlayer = document.getElementById('player');
+
+// Store active audio object URL to prevent memory leaks
+let currentAudioUrl = null;
+
+// Initialize Event Listeners
+generateBtn.addEventListener('click', synthesize);
+
 async function synthesize() {
-  const text = document.getElementById('text').value.trim();
+  const text = textInput.value.trim();
   if (!text) {
     setStatus('Please enter some text.', true);
     return;
   }
 
-  const voice = document.getElementById('voice').value;
-  const lang = document.getElementById('lang').value;
-  const btn = document.getElementById('btn');
-  btn.disabled = true;
-  setStatus('Generating...');
+  const voice = voiceSelect.value;
+  const lang = langSelect.value;
+
+  // Set UI Loading State
+  generateBtn.disabled = true;
+  generateBtn.classList.add('loading');
+  generateBtn.textContent = 'Generating Speech...';
+  setStatus('');
 
   try {
     const params = new URLSearchParams({ voice, lang });
-    const resp = await fetch('/api/tts?' + params.toString(), {
+    const resp = await fetch(`/api/tts?${params.toString()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: text,
@@ -167,23 +301,35 @@ async function synthesize() {
     }
 
     const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const player = document.getElementById('player');
-    player.src = url;
-    player.style.display = 'block';
-    player.play();
+
+    // Revoke previous audio session URL to free up browser memory
+    if (currentAudioUrl) {
+      URL.revokeObjectURL(currentAudioUrl);
+    }
+
+    currentAudioUrl = URL.createObjectURL(blob);
+    audioPlayer.src = currentAudioUrl;
+    audioPlayer.style.display = 'block';
+
+    // Play naturally, catching browser auto-play prevention errors
+    audioPlayer.play().catch(err => {
+      console.log("Audio waiting for user interaction to play: ", err);
+    });
+
     setStatus('');
   } catch (e) {
     setStatus(e.message, true);
   } finally {
-    btn.disabled = false;
+    // Reset UI State
+    generateBtn.disabled = false;
+    generateBtn.classList.remove('loading');
+    generateBtn.textContent = 'Generate Speech';
   }
 }
 
 function setStatus(msg, isError) {
-  const el = document.getElementById('status');
-  el.textContent = msg;
-  el.className = isError ? 'error' : '';
+  statusDiv.textContent = msg;
+  statusDiv.className = isError ? 'error' : '';
 }
 
 // Refresh periodically if model is not ready yet
