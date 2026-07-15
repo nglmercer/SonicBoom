@@ -2,6 +2,9 @@
 name = "SonicBoom"
 version = "0.1.0"
 edition = "2024"
+description = "High-performance web server that generates Text-to-Speech audio using the Supertonic 3 ONNX model."
+license = "MIT"
+repository = "https://github.com/daramkun/SonicBoom"
 
 [features]
 # Headless server build (default). Enable `gui` for the desktop tray icon.
@@ -14,6 +17,8 @@ coreml = ["ort/coreml"]
 cuda = ["ort/cuda"]
 # AMD ROCm acceleration for ONNX inference (Linux).
 rocm = ["ort/rocm"]
+# NOTE: `coreml`, `cuda`, and `rocm` are mutually exclusive per platform.
+# Enable at most one of them when building, e.g. `cargo build --release --features cuda`.
 
 [dependencies]
 # Async runtime (only the features actually used)
@@ -39,6 +44,8 @@ tower-sessions = { version = "0.14", features = ["memory-store"] }
 
 # ONNX inference (CoreML is macOS-only and opt-in via the `coreml` feature;
 # CUDA/ROCm are opt-in via the `cuda`/`rocm` features).
+# NOTE: `ort` is currently pinned to a release candidate (2.0.0-rc.11);
+# pin to a stable release once one is published.
 ort = { version = "2.0.0-rc.11", features = ["ndarray"] }
 ndarray = "0.17"
 

@@ -24,8 +24,16 @@ This README serves as an index to all SonicBoom documentation:
 git clone https://github.com/daramkun/SonicBoom.git
 cd SonicBoom
 
-# Build the project
+# Build the project (headless server, default)
 cargo build --release
+
+# Or build with GPU acceleration (enable at most ONE of these per platform):
+cargo build --release --features cuda     # NVIDIA CUDA (Linux/Windows)
+cargo build --release --features rocm     # AMD ROCm (Linux)
+cargo build --release --features coreml   # Apple Silicon CoreML (macOS)
+
+# Or build the desktop system-tray GUI:
+cargo build --release --features gui
 ```
 
 ### Run
@@ -58,6 +66,7 @@ The server will:
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI TTS
 - **Audio Queue System** - Play audio files directly on the server with queue management
 - **Session Management** - Secure admin sessions with lockout protection
+- **Desktop Tray (optional)** - System tray GUI via the `gui` feature (macOS/Windows/Linux)
 
 ---
 
@@ -118,6 +127,7 @@ The server will:
 
 ```bash
 # Using original API
+# Audio is encoded as Opus inside an OGG container (Content-Type: audio/ogg).
 curl -X POST "http://localhost:3000/api/tts?voice=F1" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Hello, world!" \
@@ -154,13 +164,28 @@ SonicBoom/
 │   ├── main.rs              # Application entry point
 │   ├── config.rs            # Configuration management
 │   ├── error.rs             # Error types
+│   ├── logging.rs           # Logging setup
 │   ├── admin/               # Admin panel
+│   │   ├── handlers.rs      # Admin HTTP handlers
+│   │   ├── lockout.rs       # Failed-login IP lockout
+│   │   ├── session.rs       # Admin session helpers
+│   │   └── templates.rs     # HTML templates
 │   ├── api/                 # API handlers
-│   │   ├── tts.rs          # Original TTS API
-│   │   └── openai.rs       # OpenAI-compatible API
-│   ├── auth/               # Authentication
-│   ├── tts/                # TTS engine
-│   └── web/                # Web frontend
+│   │   ├── tts.rs           # Original TTS API
+│   │   ├── openai.rs        # OpenAI-compatible API
+│   │   └── queue.rs         # Audio queue API
+│   ├── auth/                # Authentication
+│   │   ├── store.rs         # Token storage
+│   │   └── token.rs         # Token types/validation
+│   ├── tts/                 # TTS engine
+│   │   ├── audio.rs         # Audio encoding (Opus/OGG/MP3/FLAC/WAV)
+│   │   ├── download.rs      # HuggingFace model download
+│   │   ├── inference.rs     # ONNX inference
+│   │   ├── model.rs         # Model loading
+│   │   ├── queue.rs         # Server-side playback queue
+│   │   └── text.rs          # Text normalization
+│   └── web/                 # Web frontend
+│       └── index.rs         # Home page
 ├── docs/
 │   ├── api.md              # API reference
 │   ├── openai.md           # OpenAI API guide

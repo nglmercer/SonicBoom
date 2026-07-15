@@ -14,7 +14,10 @@ impl TokenStore {
         let tokens = if tokio::fs::try_exists(path).await.unwrap_or(false) {
             let data = tokio::fs::read_to_string(path).await?;
             let token_list: Vec<Token> = serde_json::from_str(&data).unwrap_or_default();
-            token_list.into_iter().map(|t| (t.value.clone(), t)).collect()
+            token_list
+                .into_iter()
+                .map(|t| (t.value.clone(), t))
+                .collect()
         } else {
             HashMap::new()
         };
