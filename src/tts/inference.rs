@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use ndarray::{Array, Array2, Array3};
 use ort::value::Tensor;
 use rand::Rng;
@@ -33,7 +33,13 @@ pub fn synthesize(
         // Reference: wrap with language tag and add period at the end
         let tagged = preprocess_chunk(chunk, lang);
         let chunk_samples = synthesize_chunk(
-            model, &tagged, style, inference_steps, chunk_size, latent_dim_eff, sample_rate,
+            model,
+            &tagged,
+            style,
+            inference_steps,
+            chunk_size,
+            latent_dim_eff,
+            sample_rate,
         )?;
         all_samples.extend(chunk_samples);
     }
@@ -45,7 +51,9 @@ pub fn synthesize(
 fn preprocess_chunk(text: &str, lang: &str) -> String {
     let text = text.trim();
     // Add period at the end if no punctuation exists
-    let needs_period = !text.ends_with(['.', '!', '?', ';', ':', ',', '\'', '"', ')', ']', '}', '…', '。']);
+    let needs_period = !text.ends_with([
+        '.', '!', '?', ';', ':', ',', '\'', '"', ')', ']', '}', '…', '。',
+    ]);
     let body = if needs_period {
         format!("{text}.")
     } else {

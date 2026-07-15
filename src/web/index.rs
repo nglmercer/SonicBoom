@@ -1,10 +1,10 @@
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 
-use crate::{tts::ModelStatus, AppState};
+use crate::{AppState, tts::ModelStatus};
 
 // Load the HTML template at compile time
 const TEMPLATE: &str = include_str!("../../templates/index.html");
@@ -52,7 +52,11 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
         .replace("STATUS_MSG", &status_msg)
         .replace(
             "BLOCK_STATUS",
-            if status_msg.is_empty() { "none" } else { "block" },
+            if status_msg.is_empty() {
+                "none"
+            } else {
+                "block"
+            },
         )
         .replace(
             "VOICE_OPTIONS",
@@ -64,10 +68,12 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
         )
         .replace("VOICE_DISABLED", if !model_ready { "disabled" } else { "" })
         .replace("BTN_DISABLED", if !model_ready { "disabled" } else { "" })
-        .replace(
-            "MODEL_READY_JS",
-            if model_ready { "true" } else { "false" },
-        );
+        .replace("MODEL_READY_JS", if model_ready { "true" } else { "false" });
 
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }

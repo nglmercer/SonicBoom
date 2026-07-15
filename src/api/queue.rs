@@ -1,7 +1,4 @@
-use axum::{
-    extract::State,
-    response::Json,
-};
+use axum::{extract::State, response::Json};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -71,7 +68,7 @@ pub async fn queue_audio(
         })
     } else {
         audio_manager.add_to_queue(id.clone(), path).await;
-        
+
         Json(QueueResponse {
             success: true,
             message: "Added to queue".to_string(),
@@ -94,11 +91,15 @@ pub async fn play_next(State(state): State<AppState>) -> Json<QueueResponse> {
     };
 
     audio_manager.play_next().await;
-    
+
     let status = audio_manager.status().await;
     Json(QueueResponse {
         success: status.is_playing,
-        message: if status.is_playing { "Now playing".to_string() } else { "Queue is empty".to_string() },
+        message: if status.is_playing {
+            "Now playing".to_string()
+        } else {
+            "Queue is empty".to_string()
+        },
         id: status.current.map(|c| c.id),
     })
 }

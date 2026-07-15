@@ -1,7 +1,7 @@
+use crate::auth::token::Token;
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use anyhow::Result;
-use crate::auth::token::Token;
 
 pub struct TokenStore {
     tokens: Arc<RwLock<Vec<Token>>>,

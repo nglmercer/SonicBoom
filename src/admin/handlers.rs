@@ -10,7 +10,10 @@ use tower_sessions::Session;
 
 use crate::{
     admin::{lockout::LoginAttemptTracker, session, templates},
-    auth::{store::TokenStore, token::{generate_token_value, Token}},
+    auth::{
+        store::TokenStore,
+        token::{Token, generate_token_value},
+    },
     config::AppConfig,
 };
 
@@ -43,8 +46,10 @@ pub async fn post_login(
     let ip = addr.ip();
 
     if state.lockout.is_locked(ip) {
-        return Html(templates::login_page(Some("Too many failed attempts. Access blocked.")))
-            .into_response();
+        return Html(templates::login_page(Some(
+            "Too many failed attempts. Access blocked.",
+        )))
+        .into_response();
     }
 
     if form.id == state.config.admin_id && form.pw == state.config.admin_pw {
@@ -62,10 +67,7 @@ pub async fn get_logout(session: Session) -> Redirect {
     Redirect::to("/admin/login")
 }
 
-pub async fn get_admin(
-    State(state): State<AdminState>,
-    session: Session,
-) -> Response {
+pub async fn get_admin(State(state): State<AdminState>, session: Session) -> Response {
     if !session::is_authenticated(&session).await {
         return Redirect::to("/admin/login").into_response();
     }
@@ -88,11 +90,15 @@ pub async fn post_create_token(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let expires_at = form.expires_at.as_deref().filter(|s| !s.is_empty()).and_then(|s| {
-        NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
-            .ok()
-            .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
-    });
+    let expires_at = form
+        .expires_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| {
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
+                .ok()
+                .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
+        });
 
     let token = Token::new(generate_token_value(), expires_at);
     if let Err(e) = state.token_store.add(token).await {

@@ -122,23 +122,29 @@ impl AudioManager {
     /// Create a new audio manager and start the audio thread
     pub fn new() -> Result<Self> {
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(100);
-        
+
         // Spawn the audio thread
         std::thread::spawn(move || {
             audio_thread(command_rx);
         });
-        
+
         Ok(Self { command_tx })
     }
 
     /// Add an audio file to the queue
     pub async fn add_to_queue(&self, id: String, path: PathBuf) {
-        let _ = self.command_tx.send(AudioCommand::Enqueue { id, path }).await;
+        let _ = self
+            .command_tx
+            .send(AudioCommand::Enqueue { id, path })
+            .await;
     }
 
     /// Play a specific audio file immediately (clears queue)
     pub async fn play_now(&self, id: String, path: PathBuf) {
-        let _ = self.command_tx.send(AudioCommand::PlayNow { id, path }).await;
+        let _ = self
+            .command_tx
+            .send(AudioCommand::PlayNow { id, path })
+            .await;
     }
 
     /// Play the next item in the queue
@@ -211,7 +217,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                 }
                 queue.set_current(None);
                 sink = None;
-                
+
                 // Try to play next
                 if let Some(item) = queue.dequeue() {
                     if let Ok(file) = File::open(&item.path) {
@@ -237,7 +243,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                 match cmd {
                     AudioCommand::Enqueue { id, path } => {
                         queue.enqueue(AudioItem { id, path });
-                        
+
                         // Auto-play if nothing is currently playing and queue is not paused
                         if sink.is_none() && !queue.paused {
                             if let Some(item) = queue.dequeue() {
@@ -262,7 +268,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                         if let Some(s) = sink.take() {
                             s.stop();
                         }
-                        
+
                         if path.exists() {
                             if let Ok(file) = File::open(&path) {
                                 let reader = BufReader::new(file);
@@ -281,7 +287,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                         if let Some(s) = sink.take() {
                             s.stop();
                         }
-                        
+
                         if let Some(item) = queue.dequeue() {
                             if item.path.exists() {
                                 if let Ok(file) = File::open(&item.path) {
@@ -327,9 +333,12 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
                         queue.set_volume(vol);
                     }
                     AudioCommand::GetStatus(tx) => {
-                        let is_playing = sink.as_ref().map(|s| !s.is_paused() && !s.empty()).unwrap_or(false);
+                        let is_playing = sink
+                            .as_ref()
+                            .map(|s| !s.is_paused() && !s.empty())
+                            .unwrap_or(false);
                         let is_paused = sink.as_ref().map(|s| s.is_paused()).unwrap_or(false);
-                        
+
                         let _ = tx.send(QueueStatus {
                             current: queue.current().cloned(),
                             queue_length: queue.len(),

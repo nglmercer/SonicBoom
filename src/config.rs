@@ -28,8 +28,7 @@ impl AppConfig {
                 .unwrap_or(false),
             token_store_path: env::var("TOKEN_STORE_PATH")
                 .unwrap_or_else(|_| "./tokens.json".to_string()),
-            model_cache_dir: env::var("MODEL_CACHE_DIR")
-                .unwrap_or_else(|_| "./models".to_string()),
+            model_cache_dir: env::var("MODEL_CACHE_DIR").unwrap_or_else(|_| "./models".to_string()),
             hf_token: env::var("HF_TOKEN").ok(),
             inference_steps: env::var("INFERENCE_STEPS")
                 .ok()

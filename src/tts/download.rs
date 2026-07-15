@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 
 use crate::tts::ModelStatus;
 
@@ -101,9 +101,7 @@ pub async fn download_models(
             continue;
         }
 
-        let url = format!(
-            "https://huggingface.co/{MODEL_REPO}/resolve/main/{filename}"
-        );
+        let url = format!("https://huggingface.co/{MODEL_REPO}/resolve/main/{filename}");
         tracing::info!("Downloading {filename}...");
 
         const MAX_RETRIES: u32 = 5;

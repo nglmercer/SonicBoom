@@ -2,8 +2,11 @@ pub mod openai;
 pub mod queue;
 pub mod tts;
 
-use axum::{routing::{post, get}, Router};
 use crate::AppState;
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 pub fn router(state: AppState) -> Router {
     Router::new()

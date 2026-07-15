@@ -103,11 +103,9 @@ fn build_session(path: &std::path::Path) -> Result<Session> {
         // Place .mlmodelc cache next to model file to prevent recompilation
         let cache_dir = path.with_extension("mlmodelc");
         let cache_dir_str = cache_dir.to_string_lossy().into_owned();
-        builder.with_execution_providers([
-            CoreMLExecutionProvider::default()
-                .with_model_cache_dir(cache_dir_str)
-                .build(),
-        ])?
+        builder.with_execution_providers([CoreMLExecutionProvider::default()
+            .with_model_cache_dir(cache_dir_str)
+            .build()])?
     };
 
     Ok(builder.commit_from_file(path)?)
@@ -137,8 +135,16 @@ impl ModelHandle {
         for (name, path) in &paths.voice_files {
             let data = std::fs::read_to_string(path)?;
             let raw: VoiceStyleRaw = serde_json::from_str(&data)?;
-            let ttl_dims = (raw.style_ttl.dims[0], raw.style_ttl.dims[1], raw.style_ttl.dims[2]);
-            let dp_dims = (raw.style_dp.dims[0], raw.style_dp.dims[1], raw.style_dp.dims[2]);
+            let ttl_dims = (
+                raw.style_ttl.dims[0],
+                raw.style_ttl.dims[1],
+                raw.style_ttl.dims[2],
+            );
+            let dp_dims = (
+                raw.style_dp.dims[0],
+                raw.style_dp.dims[1],
+                raw.style_dp.dims[2],
+            );
             let style = VoiceStyle {
                 style_ttl: raw.style_ttl.flatten(),
                 style_ttl_dims: ttl_dims,
@@ -148,7 +154,10 @@ impl ModelHandle {
             voice_styles.insert(name.clone(), style);
         }
 
-        tracing::info!("Model loaded successfully ({} voice styles)", voice_styles.len());
+        tracing::info!(
+            "Model loaded successfully ({} voice styles)",
+            voice_styles.len()
+        );
 
         Ok(Self {
             duration_predictor,

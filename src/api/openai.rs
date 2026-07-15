@@ -8,7 +8,7 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::{
     auth::AuthenticatedToken,
     error::AppError,
-    tts::{audio, inference, ModelStatus},
+    tts::{ModelStatus, audio, inference},
 };
 
 /// OpenAI-compatible TTS request body
@@ -89,12 +89,13 @@ pub async fn post_speech(
     State(state): State<crate::AppState>,
     body: String,
 ) -> Result<impl IntoResponse, AppError> {
-    let request: SpeechRequest = serde_json::from_str(&body).map_err(|e| {
-        AppError::BadRequest(format!("Invalid JSON in request body: {e}"))
-    })?;
+    let request: SpeechRequest = serde_json::from_str(&body)
+        .map_err(|e| AppError::BadRequest(format!("Invalid JSON in request body: {e}")))?;
 
     if request.input.trim().is_empty() {
-        return Err(AppError::BadRequest("Input text cannot be empty.".to_string()));
+        return Err(AppError::BadRequest(
+            "Input text cannot be empty.".to_string(),
+        ));
     }
 
     let model_handle = {
@@ -108,7 +109,9 @@ pub async fn post_speech(
                 )));
             }
             ModelStatus::Loading => {
-                return Err(AppError::ServiceUnavailable("Model is loading.".to_string()));
+                return Err(AppError::ServiceUnavailable(
+                    "Model is loading.".to_string(),
+                ));
             }
             ModelStatus::Idle => {
                 return Err(AppError::ServiceUnavailable(
@@ -116,7 +119,9 @@ pub async fn post_speech(
                 ));
             }
             ModelStatus::Failed(reason) => {
-                return Err(AppError::Internal(format!("Model failed to load: {reason}")));
+                return Err(AppError::Internal(format!(
+                    "Model failed to load: {reason}"
+                )));
             }
         }
     };
@@ -133,7 +138,7 @@ pub async fn post_speech(
             .ok_or_else(|| AppError::Internal("No voice styles available.".to_string()))?
             .to_string()
     };
-    
+
     let lang = "en".to_string(); // Default language
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
@@ -187,19 +192,17 @@ pub async fn get_voices(State(state): State<crate::AppState>) -> impl IntoRespon
     let voices = {
         let status = state.model_status.read().await;
         match &*status {
-            ModelStatus::Ready(handle) => {
-                handle
-                    .voice_styles
-                    .keys()
-                    .map(|name| {
-                        serde_json::json!({
-                            "id": name,
-                            "name": name,
-                            "object": "voice"
-                        })
+            ModelStatus::Ready(handle) => handle
+                .voice_styles
+                .keys()
+                .map(|name| {
+                    serde_json::json!({
+                        "id": name,
+                        "name": name,
+                        "object": "voice"
                     })
-                    .collect::<Vec<_>>()
-            }
+                })
+                .collect::<Vec<_>>(),
             _ => vec![],
         }
     };

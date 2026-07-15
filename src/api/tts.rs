@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     body::Body,
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::{
     auth::AuthenticatedToken,
     error::AppError,
-    tts::{audio, inference, ModelStatus},
+    tts::{ModelStatus, audio, inference},
 };
 
 #[derive(Deserialize)]
@@ -62,7 +62,11 @@ pub async fn get_status(State(state): State<crate::AppState>) -> impl IntoRespon
         },
     };
 
-    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], serde_json::to_string(&response).unwrap())
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&response).unwrap(),
+    )
 }
 
 pub async fn post_tts(
@@ -96,7 +100,9 @@ pub async fn post_tts(
                 ));
             }
             ModelStatus::Failed(reason) => {
-                return Err(AppError::Internal(format!("Model failed to load: {reason}")));
+                return Err(AppError::Internal(format!(
+                    "Model failed to load: {reason}"
+                )));
             }
         }
     };
@@ -177,7 +183,7 @@ pub async fn post_tts_and_play(
             .ok_or_else(|| AppError::Internal("No voice styles available.".to_string()))?
             .to_string(),
     };
-    
+
     let lang = query.lang.unwrap_or_else(|| "en".to_string());
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
@@ -205,7 +211,7 @@ pub async fn post_tts_and_play(
     let id = uuid::Uuid::new_v4().to_string();
     let filename = format!("{}.wav", id);
     let path = temp_dir.join(&filename);
-    
+
     std::fs::write(&path, audio_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
 
     // Add to queue or play now

@@ -3,7 +3,7 @@ pub mod token;
 
 use axum::{
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
+    http::{StatusCode, request::Parts},
 };
 
 use crate::AppState;
@@ -27,7 +27,9 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
             return Ok(AuthenticatedToken("__self__".to_string()));
         }
 
-        let auth_header = parts.headers.get("authorization")
+        let auth_header = parts
+            .headers
+            .get("authorization")
             .or_else(|| parts.headers.get("Authorization"));
 
         let token_value = match auth_header {

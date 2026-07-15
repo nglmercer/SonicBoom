@@ -46,8 +46,7 @@ pub fn encode_opus(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
     // Upsample to 48000Hz (linear interpolation)
     let resampled = upsample_linear(samples, sample_rate, OUTPUT_SAMPLE_RATE);
 
-    let mut encoder =
-        Encoder::new(OUTPUT_SAMPLE_RATE, Channels::Mono, Application::Audio)?;
+    let mut encoder = Encoder::new(OUTPUT_SAMPLE_RATE, Channels::Mono, Application::Audio)?;
 
     // Set Opus encoder to VBR (Variable Bitrate) mode for better quality
     encoder.set_bitrate(opus::Bitrate::Bits(128000))?;
@@ -131,17 +130,17 @@ fn encode_ogg_opus(packets: &[Vec<u8>], sample_rate: u32) -> Result<Vec<u8>> {
     // discarded by the decoder, so the first valid sample appears at
     // granule position 312.
     let frame_samples = FRAME_SIZE_48K as u64;
-    
+
     for (i, packet) in packets.iter().enumerate() {
         // Granule position = pre_skip + (packet_index + 1) * frame_samples
         let granule = pre_skip as u64 + frame_samples * (i as u64 + 1);
-        
+
         let end_info = if i + 1 == packets.len() {
             PacketWriteEndInfo::EndStream
         } else {
             PacketWriteEndInfo::NormalPacket
         };
-        
+
         writer.write_packet(packet.clone(), serial, end_info, granule)?;
     }
 
@@ -173,7 +172,7 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
 
 /// Encode audio as MP3 format using shine-rs
 fn encode_mp3(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
-    use shine_rs::mp3_encoder::{encode_pcm_to_mp3, Mp3EncoderConfig, StereoMode};
+    use shine_rs::mp3_encoder::{Mp3EncoderConfig, StereoMode, encode_pcm_to_mp3};
 
     // Use standard settings for maximum compatibility
     let config = Mp3EncoderConfig {
@@ -197,7 +196,7 @@ fn encode_mp3(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
 
     // Verify MP3 frame sync bytes are present (should start with 0xFF 0xFB or similar)
     //shine-rs should produce valid MP3 frames with proper headers
-    
+
     // Add ID3v2 header for better compatibility with media players
     // Many players require ID3v2 to recognize MP3 files properly
     let id3v2 = create_id3v2_header();
@@ -216,14 +215,14 @@ fn create_id3v2_header() -> Vec<u8> {
     header.push(3); // Version (ID3v2.3)
     header.push(0); // Revision
     header.push(0); // Flags (none)
-    
+
     // Size in syncsafe bytes (7 bits per byte) - standard minimal tag
     let size: u32 = 0;
     header.push(((size >> 21) & 0x7F) as u8);
     header.push(((size >> 14) & 0x7F) as u8);
     header.push(((size >> 7) & 0x7F) as u8);
     header.push((size & 0x7F) as u8);
-    
+
     header
 }
 
@@ -240,25 +239,27 @@ fn encode_flac(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
 
     let channels = 1;
     let bits_per_sample = 16;
-    
+
     // Configure encoder with proper settings
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|e| anyhow::anyhow!("FLAC config error: {:?}", e))?;
-    
+
     let source = flacenc::source::MemSource::from_samples(
-        &pcm_i32, 
-        channels, 
-        bits_per_sample, 
-        sample_rate as usize
+        &pcm_i32,
+        channels,
+        bits_per_sample,
+        sample_rate as usize,
     );
-    
+
     let block_size = 4096;
     let flac_stream = flacenc::encode_with_fixed_block_size(&config, source, block_size)
         .map_err(|e| anyhow::anyhow!("FLAC encode failed: {:?}", e))?;
-    
+
     let mut sink = flacenc::bitsink::ByteSink::new();
-    flac_stream.write(&mut sink).map_err(|e| anyhow::anyhow!("FLAC stream write failed: {:?}", e))?;
-    
+    flac_stream
+        .write(&mut sink)
+        .map_err(|e| anyhow::anyhow!("FLAC stream write failed: {:?}", e))?;
+
     Ok(sink.as_slice().to_vec())
 }

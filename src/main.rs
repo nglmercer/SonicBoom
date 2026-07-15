@@ -12,13 +12,15 @@ mod web;
 
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
+use tower_http::trace::{
+    DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
+};
 use tower_sessions::{MemoryStore, SessionManagerLayer};
-use tower_http::trace::{TraceLayer, DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, DefaultOnFailure};
 
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
 use config::AppConfig;
-use tts::{download, model::ModelHandle, queue::AudioManager, ModelStatus};
+use tts::{ModelStatus, download, model::ModelHandle, queue::AudioManager};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,11 +30,11 @@ pub struct AppState {
     pub audio_manager: Arc<Option<AudioManager>>,
 }
 
-use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    TrayIconBuilder,
-};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tray_icon::{
+    TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+};
 
 fn main() -> anyhow::Result<()> {
     // Load environment variables from .env file
@@ -75,11 +77,7 @@ fn main() -> anyhow::Result<()> {
     let open_dir_item = MenuItem::new("Open File Directory", true, None);
     let quit_item = MenuItem::new("Close Process", true, None);
 
-    tray_menu.append_items(&[
-        &open_dir_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ])?;
+    tray_menu.append_items(&[&open_dir_item, &PredefinedMenuItem::separator(), &quit_item])?;
 
     let mut tray_icon = None;
 
@@ -199,7 +197,7 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
                 .make_span_with(DefaultMakeSpan::new())
                 .on_request(DefaultOnRequest::new())
                 .on_response(DefaultOnResponse::new())
-                .on_failure(DefaultOnFailure::new())
+                .on_failure(DefaultOnFailure::new()),
         );
 
     let port = config.port;
@@ -210,7 +208,13 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     let model_status_bg = Arc::clone(&model_status);
     tokio::spawn(async move {
         *model_status_bg.write().await = ModelStatus::Downloading { progress: 0.0 };
-        match download::download_models(&model_cache_dir, hf_token.as_deref(), Arc::clone(&model_status_bg)).await {
+        match download::download_models(
+            &model_cache_dir,
+            hf_token.as_deref(),
+            Arc::clone(&model_status_bg),
+        )
+        .await
+        {
             Ok(paths) => {
                 *model_status_bg.write().await = ModelStatus::Loading;
                 match tokio::task::spawn_blocking(move || ModelHandle::load(&paths)).await {

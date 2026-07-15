@@ -4,7 +4,9 @@
 
 use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, fmt::format::Writer, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    EnvFilter, fmt, fmt::format::Writer, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 /// Custom timer that shows only time (HH:MM:SS)
 struct ShortTimer;
@@ -27,12 +29,7 @@ impl tracing_subscriber::fmt::time::FormatTime for ShortTimer {
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 /// Initialize the logging system
-pub fn init(
-    log_dir: &str,
-    log_level: &str,
-    log_to_file: bool,
-    log_to_stdout: bool,
-) {
+pub fn init(log_dir: &str, log_level: &str, log_to_file: bool, log_to_stdout: bool) {
     // Create log directory if it doesn't exist
     if log_to_file {
         if let Err(e) = std::fs::create_dir_all(log_dir) {
@@ -41,8 +38,9 @@ pub fn init(
     }
 
     // Build the env filter - include tower_http at trace level for request logging
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| format!("SonicBoom={},tower_http=trace,httparse=trace", log_level).into());
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        format!("SonicBoom={},tower_http=trace,httparse=trace", log_level).into()
+    });
 
     // Base subscriber
     let base = tracing_subscriber::registry().with(env_filter);

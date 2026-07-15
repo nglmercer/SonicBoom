@@ -1,7 +1,7 @@
 pub mod index;
 
-use axum::{routing::get, Router};
 use crate::AppState;
+use axum::{Router, routing::get};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
