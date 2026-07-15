@@ -114,6 +114,20 @@ fn build_session(path: &std::path::Path) -> Result<Session> {
             .build()])?
     };
 
+    // NVIDIA CUDA acceleration (opt-in via `--features cuda`)
+    #[cfg(feature = "cuda")]
+    let builder = {
+        use ort::execution_providers::CUDAExecutionProvider;
+        builder.with_execution_providers([CUDAExecutionProvider::default().build()])?
+    };
+
+    // AMD ROCm acceleration (opt-in via `--features rocm`)
+    #[cfg(feature = "rocm")]
+    let builder = {
+        use ort::execution_providers::ROCmExecutionProvider;
+        builder.with_execution_providers([ROCmExecutionProvider::default().build()])?
+    };
+
     Ok(builder.commit_from_file(path)?)
 }
 

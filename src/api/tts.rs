@@ -216,7 +216,9 @@ pub async fn post_tts_and_play(
     // Ensure temp directory exists
     let temp_dir = std::path::PathBuf::from("temp_audio");
     if !temp_dir.exists() {
-        std::fs::create_dir_all(&temp_dir).map_err(|e| AppError::Internal(e.to_string()))?;
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
     // Save to temp file
@@ -224,7 +226,9 @@ pub async fn post_tts_and_play(
     let filename = format!("{}.wav", id);
     let path = temp_dir.join(&filename);
 
-    std::fs::write(&path, audio_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
+    tokio::fs::write(&path, audio_bytes)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // Register temp file for cleanup after playback, then add to queue
     audio_manager.register_temp(path.clone()).await;

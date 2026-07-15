@@ -1,5 +1,6 @@
 # Stage 1: Build
-FROM rust:1.83-bookworm AS builder
+# edition = "2024" requires rustc >= 1.85
+FROM rust:1.86-bookworm AS builder
 
 WORKDIR /build
 
