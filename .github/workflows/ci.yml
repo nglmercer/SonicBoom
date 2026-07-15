@@ -62,7 +62,33 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # Install ALSA for audio playback feature (server-side queue)
+      - name: Install ALSA development libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       # GPU-accelerated builds (`--features cuda`/`rocm`/`coreml`) require the
       # respective SDKs/toolchains and are validated locally, not in CI.
       - name: Build release
         run: cargo build --release
+
+  # Verify build without playback feature (no ALSA dependency)
+  build-headless:
+    name: Build headless (no playback)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-headless
+
+      - name: Build release (no playback feature)
+        run: cargo build --release --no-default-features

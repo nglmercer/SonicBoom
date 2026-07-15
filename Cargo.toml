@@ -8,7 +8,9 @@ repository = "https://github.com/daramkun/SonicBoom"
 
 [features]
 # Headless server build (default). Enable `gui` for the desktop tray icon.
-default = []
+default = ["playback"]
+# Server-side audio playback queue (requires ALSA on Linux).
+playback = ["dep:rodio"]
 # Desktop system tray (tao/tray-icon). Only relevant on macOS/Windows/Linux desktops.
 gui = ["dep:tray-icon", "dep:tao", "dep:image", "dep:open"]
 # Apple Silicon CoreML acceleration for ONNX inference (macOS only).
@@ -57,7 +59,7 @@ shine-rs = "0.1"
 flacenc = "0.5"
 
 # Audio playback (server-side queue)
-rodio = "0.19"
+rodio = { version = "0.19", optional = true }
 
 # HuggingFace model download
 reqwest = { version = "0.12", features = ["stream"] }

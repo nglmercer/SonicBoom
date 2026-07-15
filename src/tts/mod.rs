@@ -2,6 +2,7 @@ pub mod audio;
 pub mod download;
 pub mod inference;
 pub mod model;
+#[cfg(feature = "playback")]
 pub mod queue;
 pub mod text;
 

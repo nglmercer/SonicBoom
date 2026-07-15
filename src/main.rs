@@ -21,13 +21,21 @@ use tower_sessions::{MemoryStore, SessionManagerLayer};
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
 use config::AppConfig;
-use tts::{ModelStatus, download, model::ModelHandle, queue::AudioManager};
+use tts::{ModelStatus, download, model::ModelHandle};
+#[cfg(feature = "playback")]
+use tts::queue::AudioManager;
+
+/// Type alias for the audio manager when feature is disabled.
+#[cfg(not(feature = "playback"))]
+type AudioManager = ();
 
 #[derive(Clone)]
 pub struct AppState {
     pub model_status: Arc<RwLock<ModelStatus>>,
     pub token_store: Arc<TokenStore>,
     pub config: Arc<AppConfig>,
+    /// Audio manager for server-side playback. `None` when the `playback` feature is disabled
+    /// or when initialization fails.
     pub audio_manager: Arc<Option<AudioManager>>,
 }
 
@@ -189,6 +197,7 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
 
     let model_status = Arc::new(RwLock::new(ModelStatus::Idle));
 
+    #[cfg(feature = "playback")]
     let audio_manager = match AudioManager::new() {
         Ok(manager) => Arc::new(Some(manager)),
         Err(e) => {
@@ -196,6 +205,9 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
             Arc::new(None)
         }
     };
+
+    #[cfg(not(feature = "playback"))]
+    let audio_manager = Arc::new(None);
 
     let app_state = AppState {
         model_status: Arc::clone(&model_status),

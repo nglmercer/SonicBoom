@@ -1,10 +1,11 @@
 use axum::{
-    Json,
     body::Body,
     extract::{Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+#[cfg(feature = "playback")]
+use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub struct TtsQuery {
     #[serde(default)]
     pub format: Option<String>,
     /// Play immediately?
+    #[cfg(feature = "playback")]
     pub play_now: Option<bool>,
 }
 
@@ -150,6 +152,7 @@ pub async fn post_tts(
         .into_response())
 }
 
+#[cfg(feature = "playback")]
 pub async fn post_tts_and_play(
     _token: AuthenticatedToken,
     State(state): State<crate::AppState>,
