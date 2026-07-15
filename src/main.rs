@@ -14,9 +14,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tower_http::{
     timeout::TimeoutLayer,
-    trace::{
-        DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer,
-    },
+    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 
@@ -31,35 +29,6 @@ pub struct AppState {
     pub token_store: Arc<TokenStore>,
     pub config: Arc<AppConfig>,
     pub audio_manager: Arc<Option<AudioManager>>,
-}
-
-/// Load environment, validate config and initialize logging.
-fn init_runtime() -> Arc<AppConfig> {
-    // Load environment variables from .env file
-    dotenvy::dotenv().ok();
-
-    let config = Arc::new(AppConfig::from_env());
-
-    // Validate configuration
-    if let Err(e) = config.validate() {
-        eprintln!("Configuration error: {e}");
-        std::process::exit(1);
-    }
-
-    // Initialize logging
-    logging::init(
-        &config.log_dir,
-        &config.log_level,
-        config.log_to_file,
-        config.log_to_stdout,
-    );
-
-    // Log startup
-    logging::log_startup(config.port, &config.log_dir);
-
-    tracing::info!(admin_id = %config.admin_id, "Admin credentials loaded");
-
-    config
 }
 
 #[cfg(feature = "gui")]
@@ -210,7 +179,10 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         TokenStore::load(&config.token_store_path)
             .await
             .unwrap_or_else(|e| {
-                tracing::warn!("Could not load token store from '{}': {e}. Starting with empty store.", config.token_store_path);
+                tracing::warn!(
+                    "Could not load token store from '{}': {e}. Starting with empty store.",
+                    config.token_store_path
+                );
                 TokenStore::empty()
             }),
     );
@@ -249,7 +221,10 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         .merge(api::router(app_state.clone()))
         .merge(admin::router(admin_state))
         .layer(session_layer)
-        .layer(TimeoutLayer::new(Duration::from_secs(request_timeout)))
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(request_timeout),
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new())

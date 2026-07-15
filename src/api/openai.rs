@@ -23,7 +23,7 @@ use crate::{
 pub struct SpeechRequest {
     /// The model to use (ignored, we use Supertonic 3)
     #[serde(default = "default_model")]
-    #[allow(dead_code)]  // Part of OpenAI API spec, not yet implemented
+    #[allow(dead_code)] // Part of OpenAI API spec, not yet implemented
     pub model: String,
     /// The text to synthesize
     pub input: String,
@@ -35,7 +35,7 @@ pub struct SpeechRequest {
     pub response_format: String,
     /// Speech speed (0.25 to 4.0)
     #[serde(default = "default_speed")]
-    #[allow(dead_code)]  // Part of OpenAI API spec, not yet implemented
+    #[allow(dead_code)] // Part of OpenAI API spec, not yet implemented
     pub speed: f32,
 }
 

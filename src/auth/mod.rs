@@ -82,8 +82,5 @@ fn referer_is_self(parts: &Parts) -> bool {
     }
 
     // Compare exactly, but tolerate a missing port on either side.
-    host == referer_host
-        || host.split(':').next() == referer_host.split(':').next()
+    host == referer_host || host.split(':').next() == referer_host.split(':').next()
 }
-
-

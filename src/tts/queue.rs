@@ -183,7 +183,10 @@ impl AudioManager {
     /// Temp files (e.g., WAV files synthesized for local playback) are tracked
     /// and deleted once they have finished playing to prevent disk space leaks.
     pub async fn register_temp(&self, path: PathBuf) {
-        let _ = self.command_tx.send(AudioCommand::RegisterTemp { path }).await;
+        let _ = self
+            .command_tx
+            .send(AudioCommand::RegisterTemp { path })
+            .await;
     }
 
     /// Get queue status
@@ -229,7 +232,7 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>) {
         {
             // Playback finished — clean up temp file if registered
             if let Some(current_item) = queue.current() {
-                cleanup_temp_file(current_item.path(), &mut temp_files);
+                cleanup_temp_file(&current_item.path, &mut temp_files);
             }
             queue.set_current(None);
             sink = None;
@@ -386,9 +389,9 @@ pub struct QueueStatus {
 /// Attempts to delete a temporary audio file after use.
 /// Tracks the set of temp files so each one is only deleted once.
 fn cleanup_temp_file(path: &std::path::Path, temp_files: &mut HashSet<PathBuf>) {
-    if temp_files.remove(path) {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::debug!("Failed to remove temp file '{path:?}': {e}");
-        }
+    if temp_files.remove(path)
+        && let Err(e) = std::fs::remove_file(path)
+    {
+        tracing::debug!("Failed to remove temp file '{path:?}': {e}");
     }
 }

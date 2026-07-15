@@ -24,7 +24,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
 tower-sessions = { version = "0.14", features = ["memory-store"] }
 
 # ONNX inference
-ort = { version = "2.0.0-rc.11", features = ["ndarray"] }
+ort = { version = "2.0.0-rc.11", features = ["ndarray", "coreml"] }
 ndarray = "0.17"
 
 # Audio encoding/decoding
@@ -45,12 +45,12 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Security: constant-time comparison to prevent timing attacks
+constant_time_eq = "0.3"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"
-
-# Constant-time comparison (admin credential checks)
-constant_time_eq = "0.3"
 
 # Logging
 tracing = "0.1"

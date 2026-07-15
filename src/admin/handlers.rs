@@ -53,8 +53,10 @@ pub async fn post_login(
     }
 
     // Constant-time comparison to prevent timing attacks on credential validation
-    let id_match = constant_time_eq::constant_time_eq(form.id.as_bytes(), state.config.admin_id.as_bytes());
-    let pw_match = constant_time_eq::constant_time_eq(form.pw.as_bytes(), state.config.admin_pw.as_bytes());
+    let id_match =
+        constant_time_eq::constant_time_eq(form.id.as_bytes(), state.config.admin_id.as_bytes());
+    let pw_match =
+        constant_time_eq::constant_time_eq(form.pw.as_bytes(), state.config.admin_pw.as_bytes());
 
     if id_match && pw_match {
         state.lockout.record_success(ip);
