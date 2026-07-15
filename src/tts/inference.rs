@@ -151,22 +151,28 @@ fn synthesize_chunk(
     let mut xt = Array3::<f32>::from_shape_vec((1, latent_dim_eff, latent_len), noise)?;
 
     let total_steps = inference_steps as f32;
-    let total_step_arr = Array::from_elem(1, total_steps);
+    let total_step_tensor = Tensor::from_array(Array::from_elem(1, total_steps))?;
+
+    // Pre-convert constant tensors once before the loop
+    let text_emb_tensor = Tensor::from_array(text_emb)?;
+    let style_ttl_tensor = Tensor::from_array(style_ttl)?;
+    let latent_mask_tensor = Tensor::from_array(latent_mask)?;
+    let text_mask_tensor = Tensor::from_array(text_mask)?;
 
     // 4. Flow matching loop
     // Reference: assign denoised_latent directly to xt (not Euler step)
     for step in 0..inference_steps {
-        let current_step_arr = Array::from_elem(1, step as f32);
+        let current_step_tensor = Tensor::from_array(Array::from_elem(1, step as f32))?;
 
         let (vel_dims, vel_vec): (Vec<usize>, Vec<f32>) = {
             let outputs = sessions.vector_estimator.run(ort::inputs![
                 "noisy_latent" => Tensor::from_array(xt.clone())?,
-                "text_emb"     => Tensor::from_array(text_emb.clone())?,
-                "style_ttl"    => Tensor::from_array(style_ttl.clone())?,
-                "latent_mask"  => Tensor::from_array(latent_mask.clone())?,
-                "text_mask"    => Tensor::from_array(text_mask.clone())?,
-                "current_step" => Tensor::from_array(current_step_arr)?,
-                "total_step"   => Tensor::from_array(total_step_arr.clone())?,
+                "text_emb"     => text_emb_tensor.clone(),
+                "style_ttl"    => style_ttl_tensor.clone(),
+                "latent_mask"  => latent_mask_tensor.clone(),
+                "text_mask"    => text_mask_tensor.clone(),
+                "current_step" => current_step_tensor,
+                "total_step"   => total_step_tensor.clone(),
             ])?;
             let (shape, data) = outputs["denoised_latent"].try_extract_tensor::<f32>()?;
             let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();

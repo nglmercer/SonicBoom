@@ -74,3 +74,6 @@ open = { version = "5.3", optional = true }
 [profile.release]
 lto = true
 opt-level = 3
+strip = true
+panic = "abort"
+codegen-units = 1

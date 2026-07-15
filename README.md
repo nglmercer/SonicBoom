@@ -85,22 +85,23 @@ The server will:
 
 ### OpenAI-Compatible API
 
-| Method | Endpoint           | Description                  |
-| ------ | ------------------ | ---------------------------- |
-| `POST` | `/v1/audio/speech` | Generate TTS (OpenAI format) |
-| `GET`  | `/v1/models`       | List models                  |
-| `GET`  | `/v1/voices`       | List voices                  |
+| Method | Endpoint                  | Description                  |
+| ------ | ------------------------- | ---------------------------- |
+| `POST` | `/v1/audio/speech`        | Generate TTS (OpenAI format) |
+| `GET`  | `/v1/models`              | List models                  |
+| `GET`  | `/v1/models/list`         | List models (alias)          |
+| `GET`  | `/v1/voices`              | List voices                  |
 
 ### Admin Panel
 
-| Method   | Endpoint            | Description      |
-| -------- | ------------------- | ---------------- |
-| `GET`    | `/admin`            | Admin dashboard  |
-| `POST`   | `/admin/login`      | Admin login      |
-| `POST`   | `/admin/logout`     | Admin logout     |
-| `GET`    | `/admin/tokens`     | List API tokens  |
-| `POST`   | `/admin/tokens`     | Create new token |
-| `DELETE` | `/admin/tokens/:id` | Revoke token     |
+| Method   | Endpoint                       | Description      |
+| -------- | ------------------------------ | ---------------- |
+| `GET`    | `/admin`                       | Admin dashboard  |
+| `GET`    | `/admin/login`                 | Login page       |
+| `POST`   | `/admin/login`                 | Admin login      |
+| `GET`    | `/admin/logout`                | Admin logout     |
+| `POST`   | `/admin/tokens`                | Create new token |
+| `POST`   | `/admin/tokens/{id}/revoke`    | Revoke token     |
 
 ### Web Routes
 
