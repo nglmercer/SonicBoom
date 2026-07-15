@@ -1,6 +1,6 @@
 # SonicBoom
 
-A high-performance web server that generates Text-to-Speech (TTS) audio using the Supertonic 2 ONNX model and delivers it via HTTP.
+A high-performance web server that generates Text-to-Speech (TTS) audio using the Supertonic 3 ONNX model and delivers it via HTTP.
 
 ## Documentation Index
 
@@ -43,7 +43,7 @@ cargo run --release
 The server will:
 
 1. Start listening on port 3000
-2. Download the Supertonic 2 model (first run)
+2. Download the Supertonic 3 model (first run)
 3. Load the model
 4. Be ready to serve TTS requests
 
@@ -194,5 +194,5 @@ docker-compose up -d
 
 ## Acknowledgments
 
-- [Supertonic 2](https://huggingface.co/Supertone/supertonic-2) - The TTS model
+- [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) - The TTS model
 - [ONNX Runtime](https://onnxruntime.ai/) - Cross-platform ML inference

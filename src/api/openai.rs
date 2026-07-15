@@ -23,7 +23,7 @@ use crate::{
 /// OpenAI-compatible TTS request body
 #[derive(Deserialize)]
 pub struct SpeechRequest {
-    /// The model to use (ignored, we use Supertonic 2)
+    /// The model to use (ignored, we use Supertonic 3)
     #[serde(default = "default_model")]
     pub model: String,
     /// The text to synthesize
@@ -55,17 +55,17 @@ fn default_speed() -> f32 {
     1.0
 }
 
-/// Map OpenAI voice names to Supertonic 2 voice styles
+/// Map OpenAI voice names to Supertonic 3 voice styles
 fn map_voice(openai_voice: &str) -> String {
     match openai_voice {
-        // OpenAI standard voices -> Supertonic 2 voices
+        // OpenAI standard voices -> Supertonic 3 voices
         "alloy" => "M1".to_string(),
         "echo" => "M2".to_string(),
         "fable" => "M3".to_string(),
         "onyx" => "M4".to_string(),
         "nova" => "F1".to_string(),
         "shimmer" => "F2".to_string(),
-        // Direct Supertonic 2 voice names (F1-F5, M1-M5)
+        // Direct Supertonic 3 voice names (F1-F5, M1-M5)
         _ => {
             // Check if it's a valid voice name (M1-M5 or F1-F5)
             if (openai_voice.starts_with('M') || openai_voice.starts_with('F'))
@@ -164,12 +164,12 @@ pub async fn get_models() -> impl IntoResponse {
         "object": "list",
         "data": [
             {
-                "id": "supertonic-2",
+                "id": "supertonic-3",
                 "object": "model",
                 "created": 1704067200,
                 "owned_by": "local",
                 "permission": [],
-                "root": "supertonic-2",
+                "root": "supertonic-3",
                 "parent": null,
             }
         ]

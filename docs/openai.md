@@ -113,7 +113,7 @@ Returns a list of available models.
   "object": "list",
   "data": [
     {
-      "id": "supertonic-2",
+      "id": "supertonic-3",
       "object": "model",
       "created": 1704067200,
       "owned_by": "local"

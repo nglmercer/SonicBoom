@@ -2,10 +2,10 @@
 - 개발은 macOS에서, 실제 구동은 Ubuntu 24.04 환경에서 docker로 진행
   - Metal 및 ROCm, DirectML 등으로 GPU 가속을 받을 수 있으면 더 좋음
 - 개발 언어는 Rust, Axum을 웹서버 엔진으로 하여 candle 또는 ort를 이용해 ONNX 모델을 로드하고 실행
-- 구동하려는 ONNX 모델은 Hugging Face에 올라와 있는 Supertone/supertonic-2 (TTS 생성 모델)
+- 구동하려는 ONNX 모델은 Hugging Face에 올라와 있는 Supertone/supertonic-3 (TTS 생성 모델)
   - 앱이 실행될 때 자동으로 모델을 다운로드/업데이트 받는다
   - HTTP 서버와 병렬적으로 ONNX 모델 다운로드 및 로드 진행한다
-- /api/tts 엔드포인트로 HTTP 요청을 받으면 입력된 텍스트를 Supertonic 2 모델로 음성으로 변환하여 OPUS 압축하여 반환
+- /api/tts 엔드포인트로 HTTP 요청을 받으면 입력된 텍스트를 Supertonic 3 모델로 음성으로 변환하여 OPUS 압축하여 반환
   - HTTP 요청을 할 때는 Authorization 헤더로 Bearer 토큰 입력이 필요
   - 입력값은 `text/plain` 출력값은 `audio/opus`
   - 오류는 다음과 같은 형태로 HTTP 상태 코드 반환

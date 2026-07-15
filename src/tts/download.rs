@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::tts::ModelStatus;
 
-const MODEL_REPO: &str = "Supertone/supertonic-2";
+const MODEL_REPO: &str = "Supertone/supertonic-3";
 
 const MODEL_FILES: &[&str] = &[
     "onnx/duration_predictor.onnx",
