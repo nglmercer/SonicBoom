@@ -1,0 +1,39 @@
+# cargo-audit configuration (https://docs.rs/cargo-audit)
+#
+# Auto-discovered by `cargo audit` from `.cargo/audit.toml`.
+#
+# The `validate` CI job runs `cargo audit` as a gate (see .github/workflows/ci.yml),
+# denying the `unmaintained` and `unsound` advisory categories while allowing the
+# `yanked` check (the only yanked crates are wasm-only transitive deps of reqwest
+# that we never compile for the Linux server target).
+#
+# This file records the advisories we have intentionally decided NOT to fail the
+# build on. They fall into three groups:
+#   1. Unmaintained build-only / transitive crates we cannot bump directly.
+#   2. The `gui` feature's GTK3 binding tree (gtk-rs deprecated GTK3); the
+#      headless Linux server build never enables the `gui` feature.
+#   3. `audiopus_sys` (pulled by our `opus` dependency) — no newer release exists.
+#
+# Any NEW advisory on a crate we actually depend on that is not listed here will
+# still fail CI, keeping the gate meaningful.
+[advisories]
+ignore = [
+    # --- build-only / transitive, no security impact ---
+    "RUSTSEC-2024-0436", # paste - unmaintained
+    "RUSTSEC-2024-0370", # proc-macro-error - unmaintained
+    "RUSTSEC-2026-0105", # core2 - unmaintained (wasm-only transitive via reqwest)
+    # --- `gui` feature only (GTK3 bindings, deprecated by gtk-rs) ---
+    "RUSTSEC-2024-0384", # instant - unmaintained (via tao/winit)
+    "RUSTSEC-2024-0429", # glib - unsound VariantStrIter (only via `gui`)
+    "RUSTSEC-2024-0411", # gdkwayland-sys - unmaintained
+    "RUSTSEC-2024-0412", # gdk - unmaintained
+    "RUSTSEC-2024-0413", # atk - unmaintained
+    "RUSTSEC-2024-0414", # gdkx11-sys - unmaintained
+    "RUSTSEC-2024-0415", # gtk - unmaintained
+    "RUSTSEC-2024-0416", # atk-sys - unmaintained
+    "RUSTSEC-2024-0418", # gdk-sys - unmaintained
+    "RUSTSEC-2024-0419", # gtk3-macros - unmaintained
+    "RUSTSEC-2024-0420", # gtk-sys - unmaintained
+    # --- real server dep, but no maintained replacement exists ---
+    "RUSTSEC-2026-0150", # audiopus_sys - unmaintained (pulled by `opus`)
+]
