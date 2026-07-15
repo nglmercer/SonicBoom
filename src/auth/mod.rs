@@ -22,11 +22,6 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
             return Ok(AuthenticatedToken("__no_auth__".to_string()));
         }
 
-        // Allow without auth if Referer is same host
-        if is_self_referer(parts) {
-            return Ok(AuthenticatedToken("__self__".to_string()));
-        }
-
         let auth_header = parts
             .headers
             .get("authorization")
@@ -56,28 +51,4 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
     }
 }
 
-/// Returns true if Referer header points to the same host as the request
-fn is_self_referer(parts: &Parts) -> bool {
-    let referer = match parts.headers.get("referer") {
-        Some(v) => match v.to_str() {
-            Ok(s) => s,
-            Err(_) => return false,
-        },
-        None => return false,
-    };
 
-    let host = match parts.headers.get("host") {
-        Some(v) => match v.to_str() {
-            Ok(s) => s,
-            Err(_) => return false,
-        },
-        None => return false,
-    };
-
-    // Check if referer is in "http(s)://<host>/..." form
-    referer
-        .strip_prefix("http://")
-        .or_else(|| referer.strip_prefix("https://"))
-        .map(|rest| rest == host || rest.starts_with(&format!("{host}/")))
-        .unwrap_or(false)
-}

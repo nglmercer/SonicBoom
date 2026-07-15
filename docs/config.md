@@ -27,6 +27,9 @@ SonicBoom can be configured via environment variables.
 | `TOKEN_STORE_PATH` | `./tokens.json` | Path to token storage file |
 | `ENABLE_SAMPLE_TOKEN` | `false` | Enable `SAMPLE_TOKEN` for testing |
 | `SONICBOOM_AUTH_REQUIRED` | `true` | Set to `0` or `false` to allow API access without authentication |
+| `ALLOWED_AUDIO_DIR` | - | Restrict audio queue file access to this directory (prevents path traversal) |
+| `MAX_TEXT_LENGTH` | `10000` | Maximum character length for TTS input text |
+| `REQUEST_TIMEOUT_SECS` | `120` | Request timeout in seconds |
 
 ### Logging
 
@@ -146,18 +149,26 @@ Once downloaded, they're cached locally in `MODEL_CACHE_DIR`.
 
 ### tokens.json Format
 
+Tokens are stored as a JSON array of token objects:
+
 ```json
-{
-  "tokens": [
-    {
-      "id": "token_123",
-      "token": "sk-abc123...",
-      "created_at": "2026-03-11T12:00:00Z",
-      "revoked": false
-    }
-  ]
-}
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "value": "a1b2c3d4e5f6...",
+    "created_at": "2026-03-11T12:00:00Z",
+    "expires_at": null,
+    "revoked": false
+  }
+]
 ```
+
+**Fields:**
+- `id` - Unique identifier (UUID v4)
+- `value` - The token string used for authentication
+- `created_at` - Creation timestamp (ISO 8601)
+- `expires_at` - Optional expiration timestamp (ISO 8601 or null)
+- `revoked` - Whether the token has been revoked
 
 ---
 

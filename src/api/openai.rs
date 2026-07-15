@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! OpenAI-compatible TTS API endpoints
 //!
 //! This module provides endpoints that mimic the OpenAI TTS API format,
@@ -25,6 +23,7 @@ use crate::{
 pub struct SpeechRequest {
     /// The model to use (ignored, we use Supertonic 3)
     #[serde(default = "default_model")]
+    #[allow(dead_code)]  // Part of OpenAI API spec, not yet implemented
     pub model: String,
     /// The text to synthesize
     pub input: String,
@@ -36,6 +35,7 @@ pub struct SpeechRequest {
     pub response_format: String,
     /// Speech speed (0.25 to 4.0)
     #[serde(default = "default_speed")]
+    #[allow(dead_code)]  // Part of OpenAI API spec, not yet implemented
     pub speed: f32,
 }
 
@@ -94,6 +94,12 @@ pub async fn post_speech(
         return Err(AppError::BadRequest(
             "Input text cannot be empty.".to_string(),
         ));
+    }
+    if request.input.len() > state.config.max_text_length {
+        return Err(AppError::BadRequest(format!(
+            "Input text exceeds maximum length of {} characters.",
+            state.config.max_text_length
+        )));
     }
 
     let model_handle = {

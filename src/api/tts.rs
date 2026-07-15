@@ -78,6 +78,12 @@ pub async fn post_tts(
     if body.trim().is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty.".to_string()));
     }
+    if body.len() > state.config.max_text_length {
+        return Err(AppError::BadRequest(format!(
+            "Text exceeds maximum length of {} characters.",
+            state.config.max_text_length
+        )));
+    }
 
     let model_handle = {
         let status = state.model_status.read().await;
@@ -152,6 +158,12 @@ pub async fn post_tts_and_play(
 ) -> Result<Response, AppError> {
     if body.trim().is_empty() {
         return Err(AppError::BadRequest("Text cannot be empty.".to_string()));
+    }
+    if body.len() > state.config.max_text_length {
+        return Err(AppError::BadRequest(format!(
+            "Text exceeds maximum length of {} characters.",
+            state.config.max_text_length
+        )));
     }
 
     let model_handle = {

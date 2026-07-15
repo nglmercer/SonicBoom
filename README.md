@@ -51,7 +51,7 @@ The server will:
 
 ## Features
 
-- **ONNX Runtime Inference** - Supertonic 2 with CoreML acceleration on Apple Silicon
+- **ONNX Runtime Inference** - Supertonic 3 with CoreML acceleration on Apple Silicon
 - **Streaming Audio Output** - Real-time Opus/OGG encoding
 - **Token-Based Authentication** - API access control
 - **Admin Panel** - Web-based management interface

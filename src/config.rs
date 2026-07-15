@@ -16,13 +16,30 @@ pub struct AppConfig {
     pub log_to_stdout: bool,
     // Authentication configuration
     pub auth_required: bool,
+    // Security: allowed audio directory for queue (prevents path traversal)
+    pub allowed_audio_dir: Option<String>,
+    // Maximum text length for TTS requests
+    pub max_text_length: usize,
+    // Request timeout in seconds
+    pub request_timeout_secs: u64,
 }
 
 impl AppConfig {
     pub fn from_env() -> Self {
+        let admin_pw = env::var("SONICBOOM_ADMIN_PW").unwrap_or_else(|_| {
+            // Generate a random password if none is set
+            use rand::RngCore;
+            let mut bytes = [0u8; 16];
+            rand::rng().fill_bytes(&mut bytes);
+            let pw = hex::encode(bytes);
+            eprintln!("WARNING: SONICBOOM_ADMIN_PW not set. Generated random password: {pw}");
+            eprintln!("Please set SONICBOOM_ADMIN_PW in your environment or .env file.");
+            pw
+        });
+
         Self {
             admin_id: env::var("SONICBOOM_ADMIN_ID").unwrap_or_else(|_| "admin".to_string()),
-            admin_pw: env::var("SONICBOOM_ADMIN_PW").unwrap_or_else(|_| "1234".to_string()),
+            admin_pw,
             enable_sample_token: env::var("ENABLE_SAMPLE_TOKEN")
                 .map(|v| v == "1")
                 .unwrap_or(false),
@@ -53,6 +70,32 @@ impl AppConfig {
             auth_required: env::var("SONICBOOM_AUTH_REQUIRED")
                 .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(true),
+            // Security: allowed audio directory for queue (prevents path traversal)
+            allowed_audio_dir: env::var("ALLOWED_AUDIO_DIR").ok(),
+            // Maximum text length for TTS requests (default: 10000 chars)
+            max_text_length: env::var("MAX_TEXT_LENGTH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10_000),
+            // Request timeout in seconds (default: 120s)
+            request_timeout_secs: env::var("REQUEST_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
         }
+    }
+
+    /// Validate configuration values
+    pub fn validate(&self) -> Result<(), String> {
+        if self.inference_steps == 0 {
+            return Err("INFERENCE_STEPS must be greater than 0".to_string());
+        }
+        if self.port == 0 {
+            return Err("PORT must be greater than 0".to_string());
+        }
+        if self.max_text_length == 0 {
+            return Err("MAX_TEXT_LENGTH must be greater than 0".to_string());
+        }
+        Ok(())
     }
 }

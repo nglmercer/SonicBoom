@@ -50,6 +50,37 @@ pub async fn queue_audio(
     let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let path = PathBuf::from(&req.path);
 
+    // Security: Validate path is within allowed directory if configured
+    if let Some(ref allowed_dir) = state.config.allowed_audio_dir {
+        let allowed_path = match std::path::Path::new(allowed_dir).canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Json(QueueResponse {
+                    success: false,
+                    message: format!("Server configuration error: {}", e),
+                    id: None,
+                });
+            }
+        };
+        let canonical_path = match path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Json(QueueResponse {
+                    success: false,
+                    message: format!("Invalid path: {}", e),
+                    id: None,
+                });
+            }
+        };
+        if !canonical_path.starts_with(&allowed_path) {
+            return Json(QueueResponse {
+                success: false,
+                message: "Access denied: path outside allowed directory".to_string(),
+                id: None,
+            });
+        }
+    }
+
     // Check if file exists
     if !path.exists() {
         return Json(QueueResponse {

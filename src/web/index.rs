@@ -9,8 +9,18 @@ use crate::{AppState, tts::ModelStatus};
 // Load the HTML template at compile time
 const TEMPLATE: &str = include_str!("../../templates/index.html");
 
-pub async fn get_health() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+pub async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
+    let status = state.model_status.read().await;
+    match &*status {
+        ModelStatus::Ready(_) => (StatusCode::OK, "OK"),
+        ModelStatus::Downloading { .. } => (StatusCode::SERVICE_UNAVAILABLE, "Model downloading"),
+        ModelStatus::Loading => (StatusCode::SERVICE_UNAVAILABLE, "Model loading"),
+        ModelStatus::Idle => (StatusCode::SERVICE_UNAVAILABLE, "Model idle"),
+        ModelStatus::Failed(reason) => {
+            let _ = reason; // Logged elsewhere
+            (StatusCode::SERVICE_UNAVAILABLE, "Model failed to load")
+        }
+    }
 }
 
 pub async fn get_index(State(state): State<AppState>) -> Response {

@@ -29,7 +29,7 @@ Synthesizes text to speech audio.
 | --------- | ------ | -------- | ------- | -------------------------------------- |
 | `voice`   | string | No       | `M1`    | Voice style (M1-M5, F1-F5)             |
 | `lang`    | string | No       | `en`    | Language code                          |
-| `format`  | string | No       | `opus`  | Output format: `opus`, `wav`, or `mp3` |
+| `format`  | string | No       | `opus`  | Output format: `opus`, `wav`, `mp3`, or `flac` |
 
 **Request Body:** Plain text string
 

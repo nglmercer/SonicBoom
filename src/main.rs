@@ -42,6 +42,12 @@ fn main() -> anyhow::Result<()> {
 
     let config = Arc::new(AppConfig::from_env());
 
+    // Validate configuration
+    if let Err(e) = config.validate() {
+        eprintln!("Configuration error: {e}");
+        std::process::exit(1);
+    }
+
     // Initialize logging
     logging::init(
         &config.log_dir,
@@ -155,8 +161,8 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         TokenStore::load(&config.token_store_path)
             .await
             .unwrap_or_else(|e| {
-                tracing::warn!("Could not load token store: {e}. Starting fresh.");
-                panic!("Failed to initialize token store: {e}");
+                tracing::warn!("Could not load token store from '{}': {e}. Starting with empty store.", config.token_store_path);
+                TokenStore::empty()
             }),
     );
 

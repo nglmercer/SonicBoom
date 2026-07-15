@@ -23,6 +23,14 @@ impl TokenStore {
         })
     }
 
+    /// Create an empty token store (used as fallback when loading fails)
+    pub fn empty() -> Self {
+        Self {
+            tokens: Arc::new(RwLock::new(Vec::new())),
+            path: String::new(),
+        }
+    }
+
     pub async fn validate(&self, value: &str) -> bool {
         let tokens = self.tokens.read().await;
         tokens.iter().any(|t| t.value == value && t.is_valid())
@@ -50,6 +58,9 @@ impl TokenStore {
     }
 
     async fn save_locked(&self, tokens: &[Token]) -> Result<()> {
+        if self.path.is_empty() {
+            return Ok(()); // No path set (empty store), skip saving
+        }
         let data = serde_json::to_string_pretty(tokens)?;
         tokio::fs::write(&self.path, data).await?;
         Ok(())
