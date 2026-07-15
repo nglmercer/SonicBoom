@@ -21,9 +21,9 @@ use tower_sessions::{MemoryStore, SessionManagerLayer};
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
 use config::AppConfig;
-use tts::{ModelStatus, download, model::ModelHandle};
 #[cfg(feature = "playback")]
 use tts::queue::AudioManager;
+use tts::{ModelStatus, download, model::ModelHandle};
 
 /// Type alias for the audio manager when feature is disabled.
 #[cfg(not(feature = "playback"))]

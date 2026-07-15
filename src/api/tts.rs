@@ -1,11 +1,11 @@
+#[cfg(feature = "playback")]
+use axum::Json;
 use axum::{
     body::Body,
     extract::{Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-#[cfg(feature = "playback")]
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
