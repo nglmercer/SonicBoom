@@ -26,14 +26,23 @@ repository does not depend on a sibling local checkout:
 cargo build --release --no-default-features --features tiktools-plugin --bin sonicboom-tiktools-plugin
 ```
 
-To create the installer archive (Bun and a system `tar` are required):
+To install the reusable Rust packager from the TikTools GitHub branch and create
+the installer archive:
 
 ```bash
-bun run scripts/package-plugin.ts
+cargo install --git https://github.com/nglmercer/TikTools-app \
+  --branch remake --package tiktools-plugin-sdk \
+  --features packager --bin tiktools-plugin-pack --locked
+
+tiktools-plugin-pack \
+  --manifest plugins/sonicboom.tts/plugin.json \
+  --entry target/release/sonicboom-tiktools-plugin \
+  --output dist/plugins/sonicboom.tts.plugin
 ```
 
-This writes `dist/plugins/sonicboom.tts.plugin` with the manifest and required
-SHA-256 checksums. Model files are downloaded at runtime and are not bundled.
+On Windows, pass the `.exe` entry path. The CLI writes
+`dist/plugins/sonicboom.tts.plugin` with the manifest and required SHA-256
+checksums. Model files are downloaded at runtime and are not bundled.
 
 The standalone SonicBoom server remains the default build and continues to
 expose `/api/tts` and `/v1/audio/speech`.
