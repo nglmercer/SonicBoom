@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 2,
+  "id": "sonicboom.tts",
+  "name": "SonicBoom TTS",
+  "version": "0.1.0",
+  "description": "Local multilingual text-to-speech powered by Supertonic.",
+  "runtime": "process",
+  "trust": "trusted",
+  "entry": "sonicboom-tiktools-plugin",
+  "protocolVersion": 1,
+  "targets": ["win32", "linux"],
+  "capabilities": ["tts", "audio.play"],
+  "permissions": ["audio.output"],
+  "actionTypes": [
+    {
+      "id": "sonicboom.tts.prepare",
+      "version": 1,
+      "timeoutMs": 10000,
+      "title": {"default": "Prepare SonicBoom TTS"},
+      "tag": "tts",
+      "requiredCapabilities": ["tts"],
+      "fields": []
+    },
+    {
+      "id": "sonicboom.tts.speak",
+      "version": 1,
+      "timeoutMs": 120000,
+      "title": {"default": "Speak text"},
+      "tag": "tts",
+      "requiredCapabilities": ["tts", "audio.play"],
+      "fields": [
+        {
+          "key": "text",
+          "label": {"default": "Text"},
+          "kind": "text",
+          "value": ""
+        },
+        {
+          "key": "voice",
+          "label": {"default": "Voice"},
+          "kind": "select",
+          "value": "F1",
+          "options": [
+            {"value": "F1"},
+            {"value": "F2"},
+            {"value": "F3"},
+            {"value": "F4"},
+            {"value": "F5"},
+            {"value": "M1"},
+            {"value": "M2"},
+            {"value": "M3"},
+            {"value": "M4"},
+            {"value": "M5"}
+          ]
+        },
+        {
+          "key": "language",
+          "label": {"default": "Language"},
+          "kind": "text",
+          "value": "en"
+        },
+        {
+          "key": "volume",
+          "label": {"default": "Volume"},
+          "kind": "range",
+          "value": "1",
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        {
+          "key": "overlap",
+          "label": {"default": "If speech is already playing"},
+          "kind": "select",
+          "value": "allow",
+          "options": [
+            {"value": "allow"},
+            {"value": "restart"},
+            {"value": "drop"}
+          ]
+        },
+        {
+          "key": "inferenceSteps",
+          "label": {"default": "Inference steps"},
+          "kind": "number",
+          "value": "5",
+          "min": 1,
+          "max": 50,
+          "step": 1,
+          "uiHints": {"advanced": true}
+        }
+      ]
+    }
+  ]
+}

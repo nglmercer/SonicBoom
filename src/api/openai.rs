@@ -148,7 +148,7 @@ pub async fn post_speech(
     let inference_steps = state.config.inference_steps;
 
     // Determine output format
-    let format = audio::AudioFormat::from_str(&request.response_format);
+    let format = audio::AudioFormat::parse(&request.response_format);
 
     let samples = tokio::task::spawn_blocking(move || {
         inference::synthesize(&model_handle, &text, &lang, &voice_name, inference_steps)

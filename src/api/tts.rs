@@ -131,7 +131,7 @@ pub async fn post_tts(
     let format = query
         .format
         .as_deref()
-        .map(audio::AudioFormat::from_str)
+        .map(audio::AudioFormat::parse)
         .unwrap_or(audio::AudioFormat::Opus);
 
     let samples = tokio::task::spawn_blocking(move || {

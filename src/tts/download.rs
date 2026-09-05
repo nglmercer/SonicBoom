@@ -1,9 +1,6 @@
 use anyhow::Result;
-use std::sync::Arc;
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
-
-use crate::tts::ModelStatus;
 
 const MODEL_REPO: &str = "Supertone/supertonic-3";
 
@@ -58,24 +55,36 @@ async fn download_file(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let mut file = tokio::fs::File::create(dest).await?;
-    let mut stream = resp.bytes_stream();
-    use futures_util::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        file.write_all(&chunk?).await?;
+    let temporary = dest.with_extension("download");
+    let result = async {
+        let mut file = tokio::fs::File::create(&temporary).await?;
+        let mut stream = resp.bytes_stream();
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            file.write_all(&chunk?).await?;
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+        tokio::fs::rename(&temporary, dest).await?;
+        Ok::<(), anyhow::Error>(())
     }
-    file.flush().await?;
-
-    Ok(())
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
 
-pub async fn download_models(
-    cache_dir: &str,
+pub async fn download_models<F>(
+    cache_dir: &Path,
     hf_token: Option<&str>,
-    status: Arc<RwLock<ModelStatus>>,
-) -> Result<ModelPaths> {
+    on_progress: F,
+) -> Result<ModelPaths>
+where
+    F: Fn(f32) + Send + Sync + 'static,
+{
     std::fs::create_dir_all(cache_dir)?;
-    let cache_path = std::path::Path::new(cache_dir)
+    let cache_path = cache_dir
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap().join(cache_dir));
 
@@ -91,15 +100,20 @@ pub async fn download_models(
         // Preserve subdirectory structure from filename
         let local_path = cache_path.join(filename.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-        // Skip already cached files
-        if local_path.exists() {
+        // Skip only non-empty regular files. A zero-byte or partial file is
+        // removed and downloaded atomically below.
+        if local_path.is_file()
+            && std::fs::metadata(&local_path)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+        {
             tracing::info!("Already cached: {filename}");
             paths.insert(filename.to_string(), local_path);
             downloaded += 1;
-            let progress = downloaded as f32 / total as f32;
-            *status.write().await = ModelStatus::Downloading { progress };
+            on_progress(downloaded as f32 / total as f32);
             continue;
         }
+        let _ = tokio::fs::remove_file(&local_path).await;
 
         let url = format!("https://huggingface.co/{MODEL_REPO}/resolve/main/{filename}");
         tracing::info!("Downloading {filename}...");
@@ -132,8 +146,7 @@ pub async fn download_models(
 
         paths.insert(filename.to_string(), local_path);
         downloaded += 1;
-        let progress = downloaded as f32 / total as f32;
-        *status.write().await = ModelStatus::Downloading { progress };
+        on_progress(downloaded as f32 / total as f32);
     }
 
     let voice_files: Vec<(String, std::path::PathBuf)> =

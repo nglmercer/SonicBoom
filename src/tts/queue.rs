@@ -63,6 +63,10 @@ impl AudioQueue {
         self.queue.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Set paused state
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;

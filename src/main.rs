@@ -7,7 +7,6 @@ mod auth;
 mod config;
 mod error;
 mod logging;
-mod tts;
 mod web;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -21,6 +20,7 @@ use tower_sessions::{MemoryStore, SessionManagerLayer};
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use auth::store::TokenStore;
 use config::AppConfig;
+use sonicboom::tts;
 #[cfg(feature = "playback")]
 use tts::queue::AudioManager;
 use tts::{ModelStatus, download, model::ModelHandle};
@@ -253,10 +253,15 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     let model_status_bg = Arc::clone(&model_status);
     tokio::spawn(async move {
         *model_status_bg.write().await = ModelStatus::Downloading { progress: 0.0 };
+        let status_for_progress = Arc::clone(&model_status_bg);
         match download::download_models(
-            &model_cache_dir,
+            std::path::Path::new(&model_cache_dir),
             hf_token.as_deref(),
-            Arc::clone(&model_status_bg),
+            move |progress| {
+                if let Ok(mut status) = status_for_progress.try_write() {
+                    *status = ModelStatus::Downloading { progress };
+                }
+            },
         )
         .await
         {

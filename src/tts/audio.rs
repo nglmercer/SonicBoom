@@ -14,7 +14,7 @@ pub enum AudioFormat {
 }
 
 impl AudioFormat {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "wav" => AudioFormat::Wav,
             "mp3" => AudioFormat::Mp3,
