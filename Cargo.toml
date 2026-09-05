@@ -114,7 +114,12 @@ tao = { version = "0.30", optional = true }
 image = { version = "0.25", optional = true }
 open = { version = "5.3", optional = true }
 
-tiktools-plugin-sdk = { path = "vendor/tiktools-plugin-sdk", optional = true }
+tiktools-plugin-sdk = {
+    git = "https://github.com/nglmercer/TikTools-app",
+    branch = "remake",
+    package = "tiktools-plugin-sdk",
+    optional = true,
+}
 
 [[bin]]
 name = "SonicBoom"

@@ -9,7 +9,7 @@
   "entry": "sonicboom-tiktools-plugin",
   "protocolVersion": 1,
   "targets": ["win32", "linux"],
-  "capabilities": ["tts", "audio.play"],
+  "capabilities": ["tts", "audio.play", "ui.progress"],
   "permissions": ["audio.output"],
   "actionTypes": [
     {

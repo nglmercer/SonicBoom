@@ -19,8 +19,8 @@ under their own OpenRAIL license and are separate from this plugin's code.
 
 ## Local build
 
-The plugin uses a vendored copy of the TikTools SDK, so this repository builds
-without a sibling TikTools checkout:
+The plugin uses the TikTools SDK from the public `remake` branch, so this
+repository does not depend on a sibling local checkout:
 
 ```bash
 cargo build --release --no-default-features --features tiktools-plugin --bin sonicboom-tiktools-plugin

@@ -19,6 +19,7 @@ use tiktools_plugin_sdk::prelude::*;
 const DEFAULT_INFERENCE_STEPS: usize = 5;
 const MAX_GENERATED_BYTES: u64 = 256 * 1024 * 1024;
 const GENERATED_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+const PROGRESS_EVENT_TYPE: &str = "plugin.progress";
 
 #[derive(Clone)]
 enum EngineState {
@@ -29,9 +30,17 @@ enum EngineState {
     Failed(String),
 }
 
+#[derive(Clone, PartialEq)]
+struct ProgressSnapshot {
+    status: &'static str,
+    progress_percent: Option<u8>,
+    message: String,
+}
+
 struct SonicBoomPlugin {
     state: Arc<Mutex<EngineState>>,
     generated_dir: Option<PathBuf>,
+    last_progress: Option<ProgressSnapshot>,
     _preparation_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -40,6 +49,7 @@ impl Default for SonicBoomPlugin {
         Self {
             state: Arc::new(Mutex::new(EngineState::Idle)),
             generated_dir: None,
+            last_progress: None,
             _preparation_thread: None,
         }
     }
@@ -68,6 +78,29 @@ impl Plugin for SonicBoomPlugin {
             Some(action) => Err(PluginError::unsupported(action)),
             None => Err(PluginError::invalid_request("action has no typeId")),
         }
+    }
+
+    fn poll(&mut self, _context: &PluginContext) -> PluginResult<PollResult> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| PluginError::other("engine state lock poisoned"))?
+            .clone();
+        let Some(snapshot) = progress_snapshot(&state) else {
+            return Ok(PollResult::default());
+        };
+        if self.last_progress.as_ref() == Some(&snapshot) {
+            return Ok(PollResult::default());
+        }
+        self.last_progress = Some(snapshot.clone());
+        Ok(PollResult::default().event(PluginEvent::new(
+            PROGRESS_EVENT_TYPE,
+            serde_json::json!({
+                "status": snapshot.status,
+                "progress": snapshot.progress_percent.map(|value| f32::from(value) / 100.0),
+                "message": snapshot.message,
+            }),
+        )?))
     }
 }
 
@@ -236,6 +269,32 @@ fn set_failed(state: &Arc<Mutex<EngineState>>, error: String) {
     eprintln!("SonicBoom model preparation failed: {error}");
     if let Ok(mut state) = state.lock() {
         *state = EngineState::Failed(error);
+    }
+}
+
+fn progress_snapshot(state: &EngineState) -> Option<ProgressSnapshot> {
+    match state {
+        EngineState::Idle => None,
+        EngineState::Downloading { progress } => Some(ProgressSnapshot {
+            status: "downloading",
+            progress_percent: Some((progress.clamp(0.0, 1.0) * 100.0).round() as u8),
+            message: format!("Downloading SonicBoom model: {:.0}%.", progress * 100.0),
+        }),
+        EngineState::Loading => Some(ProgressSnapshot {
+            status: "loading",
+            progress_percent: None,
+            message: "Loading SonicBoom model.".to_owned(),
+        }),
+        EngineState::Ready(_) => Some(ProgressSnapshot {
+            status: "ready",
+            progress_percent: Some(100),
+            message: "SonicBoom model is ready.".to_owned(),
+        }),
+        EngineState::Failed(error) => Some(ProgressSnapshot {
+            status: "failed",
+            progress_percent: None,
+            message: format!("SonicBoom model failed to prepare: {error}"),
+        }),
     }
 }
 
