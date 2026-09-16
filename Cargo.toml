@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "High-performance web server that generates Text-to-Speech audio using the Supertonic 3 ONNX model."
 license = "MIT"
-repository = "https://github.com/daramkun/SonicBoom"
+repository = "https://github.com/nglmercer/SonicBoom"
 
 [lib]
 name = "sonicboom"
@@ -21,7 +21,6 @@ server = [
     "dep:tower-sessions",
     "dep:constant_time_eq",
     "dep:dotenvy",
-    "dep:hex",
     "dep:tracing-appender",
     "dep:tracing-subscriber",
 ]
@@ -104,9 +103,11 @@ tracing-appender = { version = "0.2", optional = true }
 dotenvy = { version = "0.15", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-hex = { version = "0.4", optional = true }
+hex = "0.4"
 rand = "0.9"
+sha2 = "0.10"
 unicode-normalization = "0.1"
+time = "0.3"
 
 # Tray icon (Desktop GUI only — gated behind the `gui` feature)
 tray-icon = { version = "0.19", optional = true }
@@ -114,12 +115,13 @@ tao = { version = "0.30", optional = true }
 image = { version = "0.25", optional = true }
 open = { version = "5.3", optional = true }
 
-tiktools-plugin-sdk = {
-    git = "https://github.com/nglmercer/TikTools-app",
-    branch = "remake",
-    package = "tiktools-plugin-sdk",
-    optional = true,
-}
+# Pinned to an immutable revision of the `remake` branch (retrieved 2026-09-16).
+# Update intentionally via `cargo update -p tiktools-plugin-sdk` and review the diff.
+[dependencies.tiktools-plugin-sdk]
+git = "https://github.com/nglmercer/TikTools-app"
+rev = "bd38b41fe8415993b5eeee7e780e42766d7cc7f0"
+package = "tiktools-plugin-sdk"
+optional = true
 
 [[bin]]
 name = "SonicBoom"

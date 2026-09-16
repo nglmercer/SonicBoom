@@ -2,38 +2,62 @@
 #
 # Auto-discovered by `cargo audit` from `.cargo/audit.toml`.
 #
-# The `validate` CI job runs `cargo audit` as a gate (see .github/workflows/ci.yml),
-# denying the `unmaintained` and `unsound` advisory categories while allowing the
-# `yanked` check (the only yanked crates are wasm-only transitive deps of reqwest
-# that we never compile for the Linux server target).
+# The `validate` CI job runs `cargo audit --deny unmaintained --deny unsound`
+# as a gate (see .github/workflows/ci.yml). Any NEW advisory on a crate we
+# depend on that is not listed here fails the build.
 #
-# This file records the advisories we have intentionally decided NOT to fail the
-# build on. They fall into three groups:
-#   1. Unmaintained build-only / transitive crates we cannot bump directly.
-#   2. The `gui` feature's GTK3 binding tree (gtk-rs deprecated GTK3); the
-#      headless Linux server build never enables the `gui` feature.
-#   3. `audiopus_sys` (pulled by our `opus` dependency) — no newer release exists.
+# Each ignored advisory below documents: why it is present, whether the
+# affected code is compiled into our targets, whether it is reachable at
+# runtime, and the migration plan. Review this list on every dependency bump.
 #
-# Any NEW advisory on a crate we actually depend on that is not listed here will
-# still fail CI, keeping the gate meaningful.
+# Note on `cargo deny`: evaluated and deliberately not added. `cargo audit`
+# already gates advisories (including unmaintained/unsound); a second advisory
+# scanner would duplicate that check without adding policy. License/ban
+# linting is low-value here (all direct deps are MIT/Apache-2.0 or
+# permissive; see `cargo tree -e license` on demand).
 [advisories]
 ignore = [
-    # --- build-only / transitive, no security impact ---
+    # --- build-only / transitive, no security impact on the server ---
+    # paste: unmaintained proc-macro helper, pulled transitively via
+    # `ort`/`tracing` macro stacks. Compiled at build time only; its output
+    # (identifier pasting) is not reachable at runtime. Migration: disappears
+    # when upstream `ort` moves off it; no maintained fork to switch to.
     "RUSTSEC-2024-0436", # paste - unmaintained
+    # proc-macro-error: unmaintained, build-time only (diagnostic helpers for
+    # derive macros). Not linked into any binary. Migration: upstream crates
+    # migrating to `proc-macro-error-2` / `manyhow` will drop it.
     "RUSTSEC-2024-0370", # proc-macro-error - unmaintained
+    # core2: unmaintained `no_std` polyfill, wasm-only transitive dep via
+    # reqwest's wasm target deps. Never compiled for our Linux/macOS/Windows
+    # server targets. Migration: bump reqwest when a release drops it.
     "RUSTSEC-2026-0105", # core2 - unmaintained (wasm-only transitive via reqwest)
     # --- `gui` feature only (GTK3 bindings, deprecated by gtk-rs) ---
-    "RUSTSEC-2024-0384", # instant - unmaintained (via tao/winit)
+    # instant: unmaintained time shim used by tao/winit. Only compiled with
+    # `--features gui` (desktop tray); the headless/server/container builds
+    # never include it. Migration: upstream winit 0.30 rewrite; out of scope
+    # for the network server threat model.
+    "RUSTSEC-2024-0384", # instant - unmaintained (via tao/winit, gui only)
+    # glib: unsound `VariantStrIter` iterator. Only reachable via the `gui`
+    # feature's GTK stack; server builds do not compile glib. Migration:
+    # gtk-rs GTK4 bindings if/when the tray GUI is ported.
     "RUSTSEC-2024-0429", # glib - unsound VariantStrIter (only via `gui`)
-    "RUSTSEC-2024-0411", # gdkwayland-sys - unmaintained
-    "RUSTSEC-2024-0412", # gdk - unmaintained
-    "RUSTSEC-2024-0413", # atk - unmaintained
-    "RUSTSEC-2024-0414", # gdkx11-sys - unmaintained
-    "RUSTSEC-2024-0415", # gtk - unmaintained
-    "RUSTSEC-2024-0416", # atk-sys - unmaintained
-    "RUSTSEC-2024-0418", # gdk-sys - unmaintained
-    "RUSTSEC-2024-0419", # gtk3-macros - unmaintained
-    "RUSTSEC-2024-0420", # gtk-sys - unmaintained
+    # gdkwayland-sys/gdk/atk/gdkx11-sys/gtk/atk-sys/gdk-sys/gtk3-macros/gtk-sys:
+    # unmaintained GTK3 sys bindings, `gui` feature only (see glib note).
+    "RUSTSEC-2024-0411", # gdkwayland-sys - unmaintained (gui only)
+    "RUSTSEC-2024-0412", # gdk - unmaintained (gui only)
+    "RUSTSEC-2024-0413", # atk - unmaintained (gui only)
+    "RUSTSEC-2024-0414", # gdkx11-sys - unmaintained (gui only)
+    "RUSTSEC-2024-0415", # gtk - unmaintained (gui only)
+    "RUSTSEC-2024-0416", # atk-sys - unmaintained (gui only)
+    "RUSTSEC-2024-0418", # gdk-sys - unmaintained (gui only)
+    "RUSTSEC-2024-0419", # gtk3-macros - unmaintained (gui only)
+    "RUSTSEC-2024-0420", # gtk-sys - unmaintained (gui only)
     # --- real server dep, but no maintained replacement exists ---
+    # audiopus_sys: unmaintained FFI bindings, pulled by our `opus` audio
+    # encoder. It IS compiled into the server and reachable at runtime
+    # (Opus encoding path). The advisory is "unmaintained", not a memory
+    # safety bug; `opus` 0.3 has no newer release. Migration: watch for an
+    # `opus` 0.4 release or evaluate `opusic-sys`/`audiopus` alternatives;
+    # re-audit on every `cargo update -p opus`.
     "RUSTSEC-2026-0150", # audiopus_sys - unmaintained (pulled by `opus`)
 ]

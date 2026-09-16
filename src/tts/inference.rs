@@ -21,6 +21,7 @@ pub fn synthesize(
     lang: &str,
     voice_name: &str,
     inference_steps: usize,
+    max_chunk_chars: usize,
 ) -> Result<Vec<f32>> {
     let style = model
         .voice_styles
@@ -32,7 +33,7 @@ pub fn synthesize(
     let chunk_size = cfg.ae.base_chunk_size * cfg.ttl.chunk_compress_factor;
     let latent_dim_eff = cfg.ttl.latent_dim * cfg.ttl.chunk_compress_factor;
 
-    let chunks = crate::tts::text::TextProcessor::split_sentences(text);
+    let chunks = crate::tts::text::TextProcessor::split_sentences_with_limit(text, max_chunk_chars);
     let mut all_samples: Vec<f32> = Vec::new();
 
     for (i, chunk) in chunks.iter().enumerate() {

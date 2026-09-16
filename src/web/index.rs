@@ -9,17 +9,22 @@ use crate::{AppState, tts::ModelStatus};
 // Load the HTML template at compile time
 const TEMPLATE: &str = include_str!("../../templates/index.html");
 
-pub async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
+/// Liveness: the process is alive. Always 200 when the server can respond.
+/// Used by container `HEALTHCHECK` / load-balancer liveness probes.
+pub async fn get_health() -> impl IntoResponse {
+    (StatusCode::OK, "OK")
+}
+
+/// Readiness: the model is loaded and the server can synthesize.
+/// Used by load-balancer readiness probes and orchestrators.
+pub async fn get_ready(State(state): State<AppState>) -> impl IntoResponse {
     let status = state.model_status.read().await;
     match &*status {
-        ModelStatus::Ready(_) => (StatusCode::OK, "OK"),
-        ModelStatus::Downloading { .. } => (StatusCode::SERVICE_UNAVAILABLE, "Model downloading"),
-        ModelStatus::Loading => (StatusCode::SERVICE_UNAVAILABLE, "Model loading"),
-        ModelStatus::Idle => (StatusCode::SERVICE_UNAVAILABLE, "Model idle"),
-        ModelStatus::Failed(reason) => {
-            let _ = reason; // Logged elsewhere
-            (StatusCode::SERVICE_UNAVAILABLE, "Model failed to load")
-        }
+        ModelStatus::Ready(_) => (StatusCode::OK, "ready"),
+        ModelStatus::Downloading { .. } => (StatusCode::SERVICE_UNAVAILABLE, "model downloading"),
+        ModelStatus::Loading => (StatusCode::SERVICE_UNAVAILABLE, "model loading"),
+        ModelStatus::Idle => (StatusCode::SERVICE_UNAVAILABLE, "model idle"),
+        ModelStatus::Failed(_) => (StatusCode::SERVICE_UNAVAILABLE, "model failed to load"),
     }
 }
 
@@ -46,7 +51,8 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
             }
             ModelStatus::Loading => "Loading model...".to_string(),
             ModelStatus::Ready(_) => String::new(),
-            ModelStatus::Failed(e) => format!("Model load failed: {e}"),
+            // Never render internal load errors into the page.
+            ModelStatus::Failed(_) => "Model load failed. Check server logs.".to_string(),
         }
     };
 

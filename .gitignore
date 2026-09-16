@@ -4,3 +4,4 @@
 logs/**
 .env
 temp_audio/**
+/tokens.json

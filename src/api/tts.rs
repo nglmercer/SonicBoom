@@ -57,11 +57,15 @@ pub async fn get_status(State(state): State<crate::AppState>) -> impl IntoRespon
             progress: None,
             error: None,
         },
-        ModelStatus::Failed(reason) => StatusResponse {
-            status: "failed".to_string(),
-            progress: None,
-            error: Some(reason.clone()),
-        },
+        ModelStatus::Failed(reason) => {
+            // Do not expose internal load failures; they are logged server-side.
+            tracing::error!("model status requested while failed: {reason}");
+            StatusResponse {
+                status: "failed".to_string(),
+                progress: None,
+                error: Some("Model failed to load.".to_string()),
+            }
+        }
     };
 
     (
@@ -71,21 +75,33 @@ pub async fn get_status(State(state): State<crate::AppState>) -> impl IntoRespon
     )
 }
 
+/// Shared pre-inference pipeline: rate limit -> validate -> admission control.
+fn check_rate_limit(state: &crate::AppState, token: &AuthenticatedToken) -> Result<(), AppError> {
+    if !state.rate_limiter.allow(&token.rate_limit_key()) {
+        return Err(AppError::TooManyRequests(
+            "Rate limit exceeded. Try again later.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn post_tts(
-    _token: AuthenticatedToken,
+    token: AuthenticatedToken,
     State(state): State<crate::AppState>,
     Query(query): Query<TtsQuery>,
     body: String,
 ) -> Result<Response, AppError> {
-    if body.trim().is_empty() {
-        return Err(AppError::BadRequest("Text cannot be empty.".to_string()));
-    }
-    if body.len() > state.config.max_text_length {
-        return Err(AppError::BadRequest(format!(
-            "Text exceeds maximum length of {} characters.",
-            state.config.max_text_length
-        )));
-    }
+    check_rate_limit(&state, &token)?;
+    let lang = query.lang.clone().unwrap_or_else(|| "en".to_string());
+    let voice = query.voice.clone().unwrap_or_else(|| "M1".to_string());
+    sonicboom::engine::validate_tts_input(
+        &body,
+        &lang,
+        &voice,
+        state.config.inference_steps,
+        state.config.max_text_length,
+    )
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let model_handle = {
         let status = state.model_status.read().await;
@@ -108,9 +124,8 @@ pub async fn post_tts(
                 ));
             }
             ModelStatus::Failed(reason) => {
-                return Err(AppError::Internal(format!(
-                    "Model failed to load: {reason}"
-                )));
+                tracing::error!("tts request while model failed: {reason}");
+                return Err(AppError::internal("model unavailable"));
             }
         }
     };
@@ -120,12 +135,12 @@ pub async fn post_tts(
         Some(ref v) if model_handle.voice_styles.contains_key(v.as_str()) => v.clone(),
         _ => model_handle
             .default_voice()
-            .ok_or_else(|| AppError::Internal("No voice styles available.".to_string()))?
+            .ok_or_else(|| AppError::internal("no voice styles available"))?
             .to_string(),
     };
-    let lang = query.lang.unwrap_or_else(|| "en".to_string());
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
+    let max_chunk_chars = state.config.max_chunk_chars;
 
     // Determine output format
     let format = query
@@ -134,15 +149,29 @@ pub async fn post_tts(
         .map(audio::AudioFormat::parse)
         .unwrap_or(audio::AudioFormat::Opus);
 
+    // Bounded admission control before spawning blocking work.
+    let _permit = state.inference_gate.admit().await.ok_or_else(|| {
+        AppError::TooManyRequests(
+            "Server is busy. Too many pending inference requests.".to_string(),
+        )
+    })?;
+
     let samples = tokio::task::spawn_blocking(move || {
-        inference::synthesize(&model_handle, &text, &lang, &voice_name, inference_steps)
+        inference::synthesize(
+            &model_handle,
+            &text,
+            &lang,
+            &voice_name,
+            inference_steps,
+            max_chunk_chars,
+        )
     })
     .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .map_err(|e| AppError::internal(format!("inference task failed: {e}")))?
+    .map_err(|e| AppError::internal(e.to_string()))?;
 
     let audio_bytes = audio::encode_audio(&samples, sample_rate, format)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|e| AppError::internal(e.to_string()))?;
 
     Ok((
         StatusCode::OK,
@@ -154,20 +183,22 @@ pub async fn post_tts(
 
 #[cfg(feature = "playback")]
 pub async fn post_tts_and_play(
-    _token: AuthenticatedToken,
+    token: AuthenticatedToken,
     State(state): State<crate::AppState>,
     Query(query): Query<TtsQuery>,
     body: String,
 ) -> Result<Response, AppError> {
-    if body.trim().is_empty() {
-        return Err(AppError::BadRequest("Text cannot be empty.".to_string()));
-    }
-    if body.len() > state.config.max_text_length {
-        return Err(AppError::BadRequest(format!(
-            "Text exceeds maximum length of {} characters.",
-            state.config.max_text_length
-        )));
-    }
+    check_rate_limit(&state, &token)?;
+    let lang = query.lang.clone().unwrap_or_else(|| "en".to_string());
+    let voice = query.voice.clone().unwrap_or_else(|| "M1".to_string());
+    sonicboom::engine::validate_tts_input(
+        &body,
+        &lang,
+        &voice,
+        state.config.inference_steps,
+        state.config.max_text_length,
+    )
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let model_handle = {
         let status = state.model_status.read().await;
@@ -195,43 +226,56 @@ pub async fn post_tts_and_play(
         Some(ref v) if model_handle.voice_styles.contains_key(v.as_str()) => v.clone(),
         _ => model_handle
             .default_voice()
-            .ok_or_else(|| AppError::Internal("No voice styles available.".to_string()))?
+            .ok_or_else(|| AppError::internal("no voice styles available"))?
             .to_string(),
     };
 
-    let lang = query.lang.unwrap_or_else(|| "en".to_string());
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
+    let max_chunk_chars = state.config.max_chunk_chars;
     let play_now = query.play_now.unwrap_or(false);
+
+    let _permit = state.inference_gate.admit().await.ok_or_else(|| {
+        AppError::TooManyRequests(
+            "Server is busy. Too many pending inference requests.".to_string(),
+        )
+    })?;
 
     // Synthesis to WAV for local playback (Rodio likes WAV/Decoder compatibility)
     let samples = tokio::task::spawn_blocking(move || {
-        inference::synthesize(&model_handle, &text, &lang, &voice_name, inference_steps)
+        inference::synthesize(
+            &model_handle,
+            &text,
+            &lang,
+            &voice_name,
+            inference_steps,
+            max_chunk_chars,
+        )
     })
     .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .map_err(|e| AppError::internal(format!("inference task failed: {e}")))?
+    .map_err(|e| AppError::internal(e.to_string()))?;
 
     // We use WAV for internal queue to ensure maximum compatibility with rodio
     let audio_bytes = audio::encode_audio(&samples, sample_rate, audio::AudioFormat::Wav)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|e| AppError::internal(e.to_string()))?;
 
     // Ensure temp directory exists
-    let temp_dir = std::path::PathBuf::from("temp_audio");
+    let temp_dir = std::path::PathBuf::from(&state.config.temp_audio_dir);
     if !temp_dir.exists() {
         tokio::fs::create_dir_all(&temp_dir)
             .await
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| AppError::internal(e.to_string()))?;
     }
 
     // Save to temp file
     let id = uuid::Uuid::new_v4().to_string();
-    let filename = format!("{}.wav", id);
+    let filename = format!("{id}.wav");
     let path = temp_dir.join(&filename);
 
     tokio::fs::write(&path, audio_bytes)
         .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|e| AppError::internal(e.to_string()))?;
 
     // Register temp file for cleanup after playback, then add to queue
     audio_manager.register_temp(path.clone()).await;

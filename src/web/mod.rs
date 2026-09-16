@@ -7,5 +7,6 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index::get_index))
         .route("/health", get(index::get_health))
+        .route("/ready", get(index::get_ready))
         .with_state(state)
 }

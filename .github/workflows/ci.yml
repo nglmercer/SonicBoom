@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,15 +16,15 @@ jobs:
     name: Format, Lint, Test, Audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -60,13 +63,13 @@ jobs:
     name: Build release
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -81,20 +84,20 @@ jobs:
       # GPU-accelerated builds (`--features cuda`/`rocm`/`coreml`) require the
       # respective SDKs/toolchains and are validated locally, not in CI.
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
 
-  # Verify build without playback feature (no ALSA dependency)
+  # Verify the headless network-server build (no ALSA dependency).
   build-headless:
     name: Build headless (no playback)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -102,5 +105,104 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-headless
 
-      - name: Build release (no playback feature)
-        run: cargo build --release --no-default-features
+      - name: Build release (headless server)
+        run: cargo build --release --locked --no-default-features --features server
+
+      - name: Test (headless server)
+        run: cargo test --locked --no-default-features --features server
+
+  # Linux-compatible feature combinations beyond default/headless.
+  feature-matrix:
+    name: Feature matrix (${{ matrix.features }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - features: ""
+            args: --no-default-features
+          - features: tiktools-plugin
+            args: --no-default-features --features tiktools-plugin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Check ${{ matrix.features }}
+        run: cargo check --locked ${{ matrix.args }} --all-targets
+
+  docker-cpu:
+    name: Docker CPU build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build default (headless CPU) image
+        run: docker build -t sonicboom:test .
+
+      - name: Build explicit runtime target
+        run: docker build --target runtime -t sonicboom:cpu .
+
+      - name: Verify image runs as non-root
+        run: |
+          USER="$(docker inspect sonicboom:cpu --format '{{.Config.User}}')"
+          echo "image user: $USER"
+          test "$USER" = "sonicboom"
+
+  dockerfile-lint:
+    name: Dockerfile structure checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate Dockerfile security structure
+        run: |
+          set -e
+          # CUDA stage must compile with the cuda feature in its own builder.
+          grep -q 'AS builder-cuda' Dockerfile
+          grep -q -- '--features server,cuda' Dockerfile
+          grep -q 'COPY --from=builder-cuda' Dockerfile
+          # Runtime stages must drop privileges.
+          grep -q 'USER sonicboom' Dockerfile
+          # No silent-failure library copies.
+          if grep -q '|| true' Dockerfile; then
+            echo "ERROR: Dockerfile contains '|| true'" >&2
+            exit 1
+          fi
+          # Base images must be digest-pinned.
+          test "$(grep -c '@sha256:' Dockerfile)" -ge 3
+
+  supply-chain-guards:
+    name: Supply-chain guards
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: No credential stores committed
+        run: |
+          set -e
+          if git ls-files | grep -x 'tokens.json'; then
+            echo "ERROR: tokens.json must not be committed" >&2
+            exit 1
+          fi
+          if git ls-files | grep -E '^\.env$'; then
+            echo "ERROR: .env must not be committed" >&2
+            exit 1
+          fi
+
+      - name: Actions must be SHA-pinned
+        run: |
+          set -e
+          # Every step `uses:` referencing an external action must pin a full 40-hex SHA.
+          if grep -rnE '^[[:space:]]+- uses: ' .github/workflows | grep -vE 'uses: [^ ]+@[0-9a-f]{40}( #|$)'; then
+            echo "ERROR: found non-SHA-pinned action reference" >&2
+            exit 1
+          fi
+
+      - name: Git dependencies must be rev-pinned
+        run: |
+          set -e
+          if grep -n 'branch *=' Cargo.toml; then
+            echo "ERROR: Cargo git dependencies must pin 'rev', not 'branch'" >&2
+            exit 1
+          fi

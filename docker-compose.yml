@@ -1,3 +1,14 @@
+# SonicBoom production Compose file.
+#
+# First run:
+#   1. Copy the secret template:  cp .env.example .env  (then edit it)
+#      At minimum set SONICBOOM_ADMIN_PW (12+ chars) and ALLOWED_AUDIO_DIR
+#      (playback profile only).
+#   2. docker compose up -d
+#
+# Token data lives in the named `tokendata` volume (created automatically),
+# so there is no missing-file bind problem. To seed from a local file once:
+#   printf '[]\n' > tokens.json   # then import via the admin panel
 services:
   sonicboom:
     build:
@@ -7,20 +18,88 @@ services:
       - "3000:3000"
     volumes:
       - ./models:/app/models
-      - ./tokens.json:/app/tokens.json
+      - tokendata:/app/data
+    tmpfs:
+      - /tmp
     environment:
       - PORT=3000
       - RUST_LOG=info
       - MODEL_CACHE_DIR=/app/models
-      - TOKEN_STORE_PATH=/app/tokens.json
-      # 관리자 계정 (기본값: admin / 1234)
-      # - SONICBOOM_ADMIN_ID=admin
-      # - SONICBOOM_ADMIN_PW=1234
-      # 샘플 토큰 활성화 (개발/테스트용)
-      # - ENABLE_SAMPLE_TOKEN=1
+      - TOKEN_STORE_PATH=/app/data/tokens.json
+      - LOG_DIR=/app/logs
+      # Required: admin panel credentials (no defaults).
+      - SONICBOOM_ADMIN_ID=${SONICBOOM_ADMIN_ID:-admin}
+      - SONICBOOM_ADMIN_PW=${SONICBOOM_ADMIN_PW:?Set SONICBOOM_ADMIN_PW in your environment or .env file}
+      # Set to true only when terminating TLS at a reverse proxy in front.
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      # Uncomment to verify model files against a hashes manifest:
+      # - MODEL_SHA256_JSON_PATH=/app/data/models.sha256.json
+    env_file:
+      - path: .env
+        required: false
+    # The image already runs as uid 10001; pin it here too for clarity.
+    user: "10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
-  # GPU (CUDA) 버전
+  # Local speaker playback (ALSA). Requires an audio device and an explicit
+  # allowed directory for filesystem queueing.
+  sonicboom-playback:
+    build:
+      context: .
+      target: runtime-playback
+    ports:
+      - "3002:3000"
+    volumes:
+      - ./models:/app/models
+      - tokendata:/app/data
+      - ${ALLOWED_AUDIO_DIR:?Set ALLOWED_AUDIO_DIR to a host directory of audio files}:/audio:ro
+    tmpfs:
+      - /tmp
+    environment:
+      - PORT=3000
+      - RUST_LOG=info
+      - MODEL_CACHE_DIR=/app/models
+      - TOKEN_STORE_PATH=/app/data/tokens.json
+      - LOG_DIR=/app/logs
+      - ALLOWED_AUDIO_DIR=/audio
+      - SONICBOOM_ADMIN_ID=${SONICBOOM_ADMIN_ID:-admin}
+      - SONICBOOM_ADMIN_PW=${SONICBOOM_ADMIN_PW:?Set SONICBOOM_ADMIN_PW in your environment or .env file}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+    env_file:
+      - path: .env
+        required: false
+    user: "10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    devices:
+      - /dev/snd:/dev/snd
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+    profiles:
+      - playback
+    restart: unless-stopped
+
+  # GPU (CUDA) version
   sonicboom-cuda:
     build:
       context: .
@@ -29,12 +108,26 @@ services:
       - "3001:3000"
     volumes:
       - ./models:/app/models
-      - ./tokens.json:/app/tokens.json
+      - tokendata:/app/data
+    tmpfs:
+      - /tmp
     environment:
       - PORT=3000
       - RUST_LOG=info
       - MODEL_CACHE_DIR=/app/models
-      - TOKEN_STORE_PATH=/app/tokens.json
+      - TOKEN_STORE_PATH=/app/data/tokens.json
+      - LOG_DIR=/app/logs
+      - SONICBOOM_ADMIN_ID=${SONICBOOM_ADMIN_ID:-admin}
+      - SONICBOOM_ADMIN_PW=${SONICBOOM_ADMIN_PW:?Set SONICBOOM_ADMIN_PW in your environment or .env file}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+    env_file:
+      - path: .env
+        required: false
+    user: "10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     deploy:
       resources:
         reservations:
@@ -42,6 +135,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+        limits:
+          cpus: "8"
+          memory: 16G
     profiles:
       - cuda
     restart: unless-stopped
+
+volumes:
+  tokendata:

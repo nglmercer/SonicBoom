@@ -31,7 +31,12 @@ Synthesizes text to speech audio.
 | `lang`    | string | No       | `en`    | Language code                          |
 | `format`  | string | No       | `opus`  | Output format: `opus`, `wav`, `mp3`, or `flac` |
 
-**Request Body:** Plain text string
+**Request Body:** Plain text string (max `MAX_TEXT_LENGTH` Unicode chars,
+body capped at `TTS_MAX_BODY_BYTES`)
+
+> The built-in web UI (`/`) requires you to paste an API token, which it
+> sends as `Authorization: Bearer <token>`. The token stays in the page's
+> memory only (never `localStorage`, never logged).
 
 **Response:** Audio data (format based on `format` parameter)
 
@@ -137,9 +142,15 @@ Adds an audio file to the playback queue.
 
 | Field      | Type    | Required | Description                                                |
 | ---------- | ------- | -------- | ---------------------------------------------------------- |
-| `path`     | string  | Yes      | Absolute path or path relative to the audio directory      |
-| `id`       | string  | No       | Unique identifier (generated if missing)                   |
+| `path`     | string  | Yes      | Path inside `ALLOWED_AUDIO_DIR` (relative or absolute)     |
+| `id`       | string  | No       | Unique identifier 1–128 chars, no control chars (generated if missing) |
 | `play_now` | boolean | No       | If `true`, clears the queue and starts playing immediately |
+
+Queue files must live inside the server's `ALLOWED_AUDIO_DIR` (canonicalized;
+`..` escapes, symlink escapes, directories, missing files, and non-audio
+extensions `.wav/.mp3/.flac/.ogg/.opus` are rejected). All queue endpoints
+require bearer authentication. Error responses use `success: false` with an
+appropriate status (`400`/`401`/`403`/`503`) and never echo server paths.
 
 **Example:**
 
@@ -238,18 +249,35 @@ Retrieve information about current playback and the queue.
 
 ### Health Check
 
-Simple health check endpoint for load balancers and monitoring.
+Liveness endpoint for container `HEALTHCHECK` and monitoring.
 
 **Endpoint:** `GET /health`
 
 **Authentication:** None
 
-**Response:** Plain text "OK" with status 200
+**Response:** Plain text "OK" with status 200 (process alive)
 
 **Example:**
 
 ```bash
 curl http://localhost:3000/health
+```
+
+### Readiness Check
+
+Readiness endpoint for load balancers and orchestrators.
+
+**Endpoint:** `GET /ready`
+
+**Authentication:** None
+
+**Response:** `200 ready` when the model is loaded, otherwise `503`
+(downloading/loading/idle/failed — no internal details exposed)
+
+**Example:**
+
+```bash
+curl http://localhost:3000/ready
 ```
 
 ---
@@ -345,21 +373,37 @@ curl -X POST http://localhost:3000/v1/audio/speech \
 
 ## Error Codes
 
-| Status Code | Description                          |
-| ----------- | ------------------------------------ |
-| `200`       | Success                              |
-| `400`       | Bad request (invalid input)          |
-| `401`       | Unauthorized (invalid/missing token) |
-| `404`       | Not found                            |
-| `422`       | Unprocessable entity                 |
-| `500`       | Internal server error                |
-| `503`       | Service unavailable (model loading)  |
+| Status Code | Description                                         |
+| ----------- | --------------------------------------------------- |
+| `200`       | Success                                             |
+| `400`       | Bad request (invalid input)                         |
+| `401`       | Unauthorized (invalid/missing token)                |
+| `403`       | Forbidden (queue path outside allowed directory)    |
+| `404`       | Not found                                           |
+| `413`       | Payload too large (body limit exceeded)             |
+| `422`       | Unprocessable entity                                |
+| `429`       | Too many requests (rate limit / inference saturated)|
+| `500`       | Internal server error (generic message + `request_id`) |
+| `503`       | Service unavailable (model loading)                 |
+
+Error responses are stable JSON (`error`, `message`, `status`,
+`request_id`) and never include filesystem paths, model internals, or
+secrets. Use `request_id` to correlate with server logs.
 
 ---
 
 ## Rate Limiting
 
+Expensive TTS endpoints (`POST /api/tts`, `POST /api/tts/play`,
+`POST /v1/audio/speech`) are rate-limited per API token
+(`TTS_RATE_LIMIT_REQUESTS` per `TTS_RATE_LIMIT_WINDOW_SECS`, default
+20/min; exceeded → `429`).
+
+Inference itself is concurrency-bounded (`MAX_CONCURRENT_INFERENCE`,
+`MAX_PENDING_INFERENCE`); saturated requests are rejected with `429`
+instead of queueing unboundedly.
+
 The admin panel includes login attempt tracking to prevent brute-force attacks.
 
-- Maximum 5 failed attempts per IP
-- 15-minute lockout after threshold exceeded
+- Maximum 5 failed attempts per IP in 10 minutes
+- 15-minute lockout after threshold exceeded (expires automatically)

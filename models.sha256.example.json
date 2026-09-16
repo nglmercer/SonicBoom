@@ -1,0 +1,9 @@
+{
+  "_comment": "Map each model file (repository-relative path) to its expected SHA-256 hex digest. Generate after a trusted first download, e.g.:  cd models && sha256sum onnx/*.onnx onnx/*.json config.json voice_styles/*.json",
+  "onnx/duration_predictor.onnx": "<64-hex-sha256>",
+  "onnx/text_encoder.onnx": "<64-hex-sha256>",
+  "onnx/vector_estimator.onnx": "<64-hex-sha256>",
+  "onnx/vocoder.onnx": "<64-hex-sha256>",
+  "onnx/unicode_indexer.json": "<64-hex-sha256>",
+  "onnx/tts.json": "<64-hex-sha256>"
+}

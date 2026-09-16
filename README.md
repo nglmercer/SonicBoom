@@ -21,7 +21,7 @@ This README serves as an index to all SonicBoom documentation:
 
 ```bash
 # Clone the repository
-git clone https://github.com/daramkun/SonicBoom.git
+git clone https://github.com/nglmercer/SonicBoom.git
 cd SonicBoom
 
 # Build the project (headless server, default)
@@ -39,14 +39,20 @@ cargo build --release --features gui
 ### Run
 
 ```bash
-# Set environment variables (optional)
+# Set environment variables (admin password is REQUIRED, 12+ chars)
 export PORT=3000
 export SONICBOOM_ADMIN_ID=admin
-export SONICBOOM_ADMIN_PW=your_secure_password
+export SONICBOOM_ADMIN_PW=your_strong_password_12_plus_chars
+export ALLOWED_AUDIO_DIR=./audio   # required for playback builds
 
 # Run the server
 cargo run --release
 ```
+
+> The server refuses to start without `SONICBOOM_ADMIN_PW`. API tokens are
+> stored as hashes in `tokens.json` (see `tokens.example.json`); create the
+> file with `printf '[]\n' > tokens.json` if needed, then mint tokens in the
+> admin panel (`/admin`). The admin panel shows each new token exactly once.
 
 The server will:
 
@@ -108,16 +114,17 @@ The server will:
 | `GET`    | `/admin`                       | Admin dashboard  |
 | `GET`    | `/admin/login`                 | Login page       |
 | `POST`   | `/admin/login`                 | Admin login      |
-| `GET`    | `/admin/logout`                | Admin logout     |
+| `POST`   | `/admin/logout`                | Admin logout     |
 | `POST`   | `/admin/tokens`                | Create new token |
 | `POST`   | `/admin/tokens/{id}/revoke`    | Revoke token     |
 
 ### Web Routes
 
-| Method | Endpoint  | Description  |
-| ------ | --------- | ------------ |
-| `GET`  | `/`       | Home page    |
-| `GET`  | `/health` | Health check |
+| Method | Endpoint  | Description                        |
+| ------ | --------- | ---------------------------------- |
+| `GET`  | `/`       | Home page (TTS demo, needs token)  |
+| `GET`  | `/health` | Liveness probe                     |
+| `GET`  | `/ready`  | Readiness probe (model loaded)     |
 
 ---
 
@@ -201,20 +208,33 @@ SonicBoom/
 ## Docker
 
 ```bash
-# Build and run with Docker
+# Build and run with Docker (headless CPU server; no local playback)
 docker build -t sonicboom .
 docker run -p 3000:3000 \
   -e SONICBOOM_ADMIN_ID=admin \
-  -e SONICBOOM_ADMIN_PW=password \
+  -e SONICBOOM_ADMIN_PW=your_strong_password_12_plus_chars \
   -e HF_TOKEN=your_hf_token \
+  -v sonicboom-tokens:/app/data \
   sonicboom
+
+# With local ALSA playback:
+docker build --target runtime-playback -t sonicboom:playback .
+# With CUDA acceleration (compiles with --features cuda):
+docker build --target runtime-cuda -t sonicboom:cuda .
 ```
 
 Or use docker-compose:
 
 ```bash
-docker-compose up -d
+export SONICBOOM_ADMIN_PW=your_strong_password_12_plus_chars
+docker compose up -d            # CPU server
+docker compose --profile playback up -d   # with local playback
+docker compose --profile cuda up -d       # CUDA server
 ```
+
+Images run as non-root, use digest-pinned bases, and harden the container
+(`no-new-privileges`, dropped capabilities, resource limits). See
+[Configuration](docs/config.md#container-hardening) for details.
 
 ---
 
@@ -222,3 +242,6 @@ docker-compose up -d
 
 - [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) - The TTS model
 - [ONNX Runtime](https://onnxruntime.ai/) - Cross-platform ML inference
+- Upstream project: [daramkun/SonicBoom](https://github.com/daramkun/SonicBoom)
+  (this repository, [nglmercer/SonicBoom](https://github.com/nglmercer/SonicBoom),
+  is a hardened fork)

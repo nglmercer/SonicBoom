@@ -12,6 +12,10 @@ pub struct EngineConfig {
     pub model_dir: PathBuf,
     pub hf_token: Option<String>,
     pub inference_steps: usize,
+    /// Pinned HuggingFace revision. Defaults to [`download::DEFAULT_MODEL_REVISION`].
+    pub model_revision: Option<String>,
+    /// Optional expected-hashes manifest (see [`download::load_expected_hashes`]).
+    pub model_hashes_path: Option<PathBuf>,
 }
 
 impl EngineConfig {
@@ -20,6 +24,8 @@ impl EngineConfig {
             model_dir: model_dir.into(),
             hf_token: None,
             inference_steps: 5,
+            model_revision: None,
+            model_hashes_path: None,
         }
     }
 }
@@ -32,33 +38,51 @@ pub struct SynthesisRequest {
     pub inference_steps: usize,
 }
 
+/// Shared TTS input validation used by both the reusable engine and the
+/// HTTP API so the rules cannot drift apart. Lengths are measured in Unicode
+/// characters, not UTF-8 bytes.
+pub fn validate_tts_input(
+    text: &str,
+    language: &str,
+    voice: &str,
+    inference_steps: usize,
+    max_text_chars: usize,
+) -> Result<()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(anyhow!("text cannot be empty"));
+    }
+    if text.chars().count() > max_text_chars {
+        return Err(anyhow!("text exceeds {max_text_chars} characters"));
+    }
+    if language.is_empty()
+        || language.len() > 16
+        || !language
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(anyhow!("language must be a valid language tag"));
+    }
+    if voice.is_empty() || voice.len() > 16 {
+        return Err(anyhow!("voice must be a valid voice name"));
+    }
+    if !(1..=MAX_INFERENCE_STEPS).contains(&inference_steps) {
+        return Err(anyhow!(
+            "inferenceSteps must be between 1 and {MAX_INFERENCE_STEPS}"
+        ));
+    }
+    Ok(())
+}
+
 impl SynthesisRequest {
     pub fn validate(&self) -> Result<()> {
-        let text = self.text.trim();
-        if text.is_empty() {
-            return Err(anyhow!("text cannot be empty"));
-        }
-        if text.chars().count() > MAX_TEXT_CHARS {
-            return Err(anyhow!("text exceeds {MAX_TEXT_CHARS} characters"));
-        }
-        if self.language.is_empty()
-            || self.language.len() > 16
-            || !self
-                .language
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
-            return Err(anyhow!("language must be a valid language tag"));
-        }
-        if self.voice.is_empty() || self.voice.len() > 16 {
-            return Err(anyhow!("voice must be a valid voice name"));
-        }
-        if !(1..=MAX_INFERENCE_STEPS).contains(&self.inference_steps) {
-            return Err(anyhow!(
-                "inferenceSteps must be between 1 and {MAX_INFERENCE_STEPS}"
-            ));
-        }
-        Ok(())
+        validate_tts_input(
+            &self.text,
+            &self.language,
+            &self.voice,
+            self.inference_steps,
+            MAX_TEXT_CHARS,
+        )
     }
 }
 
@@ -77,9 +101,23 @@ impl SonicBoomEngine {
     where
         F: Fn(f32) + Send + Sync + 'static,
     {
-        let paths =
-            download::download_models(&config.model_dir, config.hf_token.as_deref(), on_progress)
-                .await?;
+        let revision = config
+            .model_revision
+            .clone()
+            .unwrap_or_else(|| download::DEFAULT_MODEL_REVISION.to_string());
+        let expected_hashes = config
+            .model_hashes_path
+            .as_ref()
+            .map(|p| download::load_expected_hashes(&p.to_string_lossy()))
+            .transpose()?;
+        let paths = download::download_models_with_options(
+            &config.model_dir,
+            config.hf_token.as_deref(),
+            &revision,
+            expected_hashes.as_ref(),
+            on_progress,
+        )
+        .await?;
         let model = tokio::task::spawn_blocking(move || ModelHandle::load(&paths))
             .await
             .map_err(|error| anyhow!("model loading task failed: {error}"))??;
@@ -108,6 +146,7 @@ impl SonicBoomEngine {
             &request.language,
             &request.voice,
             request.inference_steps,
+            crate::tts::text::DEFAULT_MAX_CHUNK_CHARS,
         )?;
         let sample_rate = self.model.sample_rate();
         let wav = audio::encode_audio(&samples, sample_rate, audio::AudioFormat::Wav)?;

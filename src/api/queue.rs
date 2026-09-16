@@ -1,16 +1,20 @@
-use axum::{extract::State, response::Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Json},
+};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::AppState;
 use crate::tts::queue::QueueStatus;
+use crate::{AppState, auth::AuthenticatedToken};
 
 /// Request to add an audio file to the queue
 #[derive(Debug, Deserialize)]
 pub struct QueueAudioRequest {
     /// Unique identifier for the audio (will be returned in responses)
     pub id: Option<String>,
-    /// Path to the audio file (absolute or relative to audio directory)
+    /// Path to the audio file (must be inside `ALLOWED_AUDIO_DIR`)
     pub path: String,
     /// If true, play immediately (clears queue)
     pub play_now: Option<bool>,
@@ -31,212 +35,440 @@ pub struct QueueResponse {
     pub id: Option<String>,
 }
 
+fn failure(status: StatusCode, message: &str) -> (StatusCode, Json<QueueResponse>) {
+    (
+        status,
+        Json(QueueResponse {
+            success: false,
+            message: message.to_string(),
+            id: None,
+        }),
+    )
+}
+
+/// Validate a user-supplied queue id: 1-128 chars, no control characters.
+pub fn validate_queue_id(id: &str) -> Result<(), &'static str> {
+    let len = id.chars().count();
+    if len == 0 || len > 128 {
+        return Err("queue id must be 1-128 characters");
+    }
+    if id.chars().any(|c| c.is_control()) {
+        return Err("queue id must not contain control characters");
+    }
+    Ok(())
+}
+
+const ALLOWED_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "opus"];
+
+/// Resolve `requested` strictly inside `allowed_dir`.
+///
+/// - Both sides are canonicalized; symlinks cannot escape the root.
+/// - The target must exist and be a regular file (no directories).
+/// - The extension must be an allowed audio format.
+///
+/// Error messages never echo full filesystem paths.
+pub fn resolve_inside_allowed_dir(
+    allowed_dir: &str,
+    requested: &str,
+) -> Result<PathBuf, &'static str> {
+    let allowed_root = Path::new(allowed_dir)
+        .canonicalize()
+        .map_err(|_| "server audio directory is misconfigured")?;
+    let candidate = Path::new(requested);
+    // Resolve relative paths against the allowed root so `path` cannot be
+    // interpreted relative to the server's working directory.
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        allowed_root.join(candidate)
+    };
+    let canonical = joined
+        .canonicalize()
+        .map_err(|_| "audio file not found or not accessible")?;
+    if !canonical.starts_with(&allowed_root) {
+        return Err("access denied: path outside allowed directory");
+    }
+    let metadata = std::fs::metadata(&canonical).map_err(|_| "audio file not accessible")?;
+    if !metadata.is_file() {
+        return Err("audio path must be a regular file");
+    }
+    let extension_ok = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ALLOWED_AUDIO_EXTENSIONS
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        });
+    if !extension_ok {
+        return Err("unsupported audio file extension");
+    }
+    Ok(canonical)
+}
+
 /// Add audio to the queue or play immediately
 pub async fn queue_audio(
+    _token: AuthenticatedToken,
     State(state): State<AppState>,
     Json(req): Json<QueueAudioRequest>,
-) -> Json<QueueResponse> {
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueResponse {
-                success: false,
-                message: "Audio manager not initialized".to_string(),
-                id: None,
-            });
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio manager not initialized",
+            );
+        }
+    };
+
+    let allowed_dir = match state.config.allowed_audio_dir.as_deref() {
+        Some(dir) => dir,
+        None => {
+            tracing::error!("filesystem queue used without ALLOWED_AUDIO_DIR");
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Filesystem queue is not configured on this server",
+            );
         }
     };
 
     let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let path = PathBuf::from(&req.path);
+    if let Err(message) = validate_queue_id(&id) {
+        return failure(StatusCode::BAD_REQUEST, message);
+    }
 
-    // Security: Validate path is within allowed directory if configured
-    if let Some(ref allowed_dir) = state.config.allowed_audio_dir {
-        let allowed_path = match std::path::Path::new(allowed_dir).canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                return Json(QueueResponse {
-                    success: false,
-                    message: format!("Server configuration error: {}", e),
-                    id: None,
-                });
-            }
-        };
-        let canonical_path = match path.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                return Json(QueueResponse {
-                    success: false,
-                    message: format!("Invalid path: {}", e),
-                    id: None,
-                });
-            }
-        };
-        if !canonical_path.starts_with(&allowed_path) {
-            return Json(QueueResponse {
-                success: false,
-                message: "Access denied: path outside allowed directory".to_string(),
-                id: None,
-            });
+    let path = match resolve_inside_allowed_dir(allowed_dir, &req.path) {
+        Ok(path) => path,
+        Err(message) => {
+            let status = if message == "server audio directory is misconfigured" {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else if message == "access denied: path outside allowed directory" {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return failure(status, message);
         }
-    }
-
-    // Check if file exists
-    if !path.exists() {
-        return Json(QueueResponse {
-            success: false,
-            message: format!("Audio file not found: {}", req.path),
-            id: None,
-        });
-    }
+    };
 
     if req.play_now.unwrap_or(false) {
         audio_manager.play_now(id.clone(), path).await;
-        Json(QueueResponse {
-            success: true,
-            message: "Playing immediately".to_string(),
-            id: Some(id),
-        })
+        (
+            StatusCode::OK,
+            Json(QueueResponse {
+                success: true,
+                message: "Playing immediately".to_string(),
+                id: Some(id),
+            }),
+        )
     } else {
         audio_manager.add_to_queue(id.clone(), path).await;
 
-        Json(QueueResponse {
-            success: true,
-            message: "Added to queue".to_string(),
-            id: Some(id),
-        })
+        (
+            StatusCode::OK,
+            Json(QueueResponse {
+                success: true,
+                message: "Added to queue".to_string(),
+                id: Some(id),
+            }),
+        )
     }
 }
 
 /// Play the next item in the queue
-pub async fn play_next(State(state): State<AppState>) -> Json<QueueResponse> {
+pub async fn play_next(
+    _token: AuthenticatedToken,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueResponse {
-                success: false,
-                message: "Audio manager not initialized".to_string(),
-                id: None,
-            });
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio manager not initialized",
+            );
         }
     };
 
     audio_manager.play_next().await;
 
     let status = audio_manager.status().await;
-    Json(QueueResponse {
-        success: status.is_playing,
-        message: if status.is_playing {
-            "Now playing".to_string()
-        } else {
-            "Queue is empty".to_string()
-        },
-        id: status.current.map(|c| c.id),
-    })
+    (
+        StatusCode::OK,
+        Json(QueueResponse {
+            success: status.is_playing,
+            message: if status.is_playing {
+                "Now playing".to_string()
+            } else {
+                "Queue is empty".to_string()
+            },
+            id: status.current.map(|c| c.id),
+        }),
+    )
 }
 
 /// Pause playback
-pub async fn pause_audio(State(state): State<AppState>) -> Json<QueueResponse> {
+pub async fn pause_audio(
+    _token: AuthenticatedToken,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueResponse {
-                success: false,
-                message: "Audio manager not initialized".to_string(),
-                id: None,
-            });
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio manager not initialized",
+            );
         }
     };
 
     audio_manager.pause().await;
-    Json(QueueResponse {
-        success: true,
-        message: "Playback paused".to_string(),
-        id: None,
-    })
+    (
+        StatusCode::OK,
+        Json(QueueResponse {
+            success: true,
+            message: "Playback paused".to_string(),
+            id: None,
+        }),
+    )
 }
 
 /// Resume playback
-pub async fn resume_audio(State(state): State<AppState>) -> Json<QueueResponse> {
+pub async fn resume_audio(
+    _token: AuthenticatedToken,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueResponse {
-                success: false,
-                message: "Audio manager not initialized".to_string(),
-                id: None,
-            });
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio manager not initialized",
+            );
         }
     };
 
     audio_manager.resume().await;
-    Json(QueueResponse {
-        success: true,
-        message: "Playback resumed".to_string(),
-        id: None,
-    })
+    (
+        StatusCode::OK,
+        Json(QueueResponse {
+            success: true,
+            message: "Playback resumed".to_string(),
+            id: None,
+        }),
+    )
 }
 
 /// Stop playback and clear queue
-pub async fn stop_audio(State(state): State<AppState>) -> Json<QueueResponse> {
+pub async fn stop_audio(
+    _token: AuthenticatedToken,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueResponse {
-                success: false,
-                message: "Audio manager not initialized".to_string(),
-                id: None,
-            });
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio manager not initialized",
+            );
         }
     };
 
     audio_manager.stop().await;
-    Json(QueueResponse {
-        success: true,
-        message: "Playback stopped and queue cleared".to_string(),
-        id: None,
-    })
+    (
+        StatusCode::OK,
+        Json(QueueResponse {
+            success: true,
+            message: "Playback stopped and queue cleared".to_string(),
+            id: None,
+        }),
+    )
 }
 
 /// Set volume
 pub async fn set_volume(
+    _token: AuthenticatedToken,
     State(state): State<AppState>,
     Json(req): Json<PlaybackControlRequest>,
-) -> Json<QueueResponse> {
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueResponse {
-                success: false,
-                message: "Audio manager not initialized".to_string(),
-                id: None,
-            });
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio manager not initialized",
+            );
         }
     };
 
     let volume = req.volume.unwrap_or(1.0).clamp(0.0, 1.0);
     audio_manager.set_volume(volume).await;
-    Json(QueueResponse {
-        success: true,
-        message: format!("Volume set to {}", volume),
-        id: None,
-    })
+    (
+        StatusCode::OK,
+        Json(QueueResponse {
+            success: true,
+            message: format!("Volume set to {volume}"),
+            id: None,
+        }),
+    )
 }
 
 /// Get queue status
-pub async fn get_queue_status(State(state): State<AppState>) -> Json<QueueStatus> {
+pub async fn get_queue_status(
+    _token: AuthenticatedToken,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
-            return Json(QueueStatus {
-                current: None,
-                queue_length: 0,
-                is_playing: false,
-                is_paused: false,
-                volume: 1.0,
-            });
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(QueueStatus {
+                    current: None,
+                    queue_length: 0,
+                    is_playing: false,
+                    is_paused: false,
+                    volume: 1.0,
+                }),
+            );
         }
     };
 
-    Json(audio_manager.status().await)
+    (StatusCode::OK, Json(audio_manager.status().await))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir()
+                .join(format!("sonicboom-queue-test-{}-{id}", std::process::id()));
+            std::fs::create_dir_all(path.join("allowed")).unwrap();
+            std::fs::create_dir_all(path.join("outside")).unwrap();
+            Self { path }
+        }
+
+        fn allowed(&self) -> PathBuf {
+            self.path.join("allowed")
+        }
+
+        fn file(&self, name: &str) -> PathBuf {
+            let path = self.allowed().join(name);
+            std::fs::write(&path, b"fake audio").unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn file_inside_allowed_dir_is_allowed() {
+        let dir = TempDir::new();
+        let file = dir.file("song.wav");
+        let resolved =
+            resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), file.to_str().unwrap())
+                .unwrap();
+        assert!(resolved.starts_with(dir.allowed().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn relative_path_resolves_inside_allowed_dir() {
+        let dir = TempDir::new();
+        dir.file("song.mp3");
+        assert!(resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), "song.mp3").is_ok());
+    }
+
+    #[test]
+    fn dotdot_escape_is_denied() {
+        let dir = TempDir::new();
+        let outside = dir.path.join("outside").join("evil.wav");
+        std::fs::write(&outside, b"fake audio").unwrap();
+        let attack = dir.allowed().join("..").join("outside").join("evil.wav");
+        let err =
+            resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), attack.to_str().unwrap())
+                .unwrap_err();
+        assert_eq!(err, "access denied: path outside allowed directory");
+    }
+
+    #[test]
+    fn absolute_outside_path_is_denied() {
+        let dir = TempDir::new();
+        let err = resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), "/etc/hostname")
+            .unwrap_err();
+        assert!(
+            err == "access denied: path outside allowed directory"
+                || err == "audio file not found or not accessible"
+                || err == "unsupported audio file extension",
+            "unexpected: {err}"
+        );
+        assert!(!err.contains("/etc/hostname"), "path leaked: {err}");
+    }
+
+    #[test]
+    fn missing_file_is_denied() {
+        let dir = TempDir::new();
+        let err =
+            resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), "nope.wav").unwrap_err();
+        assert_eq!(err, "audio file not found or not accessible");
+    }
+
+    #[test]
+    fn directory_is_denied() {
+        let dir = TempDir::new();
+        let sub = dir.allowed().join("sub.wav");
+        std::fs::create_dir_all(&sub).unwrap();
+        let err =
+            resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), sub.to_str().unwrap())
+                .unwrap_err();
+        assert_eq!(err, "audio path must be a regular file");
+    }
+
+    #[test]
+    fn unsupported_extension_is_denied() {
+        let dir = TempDir::new();
+        let path = dir.allowed().join("run.sh");
+        std::fs::write(&path, b"echo hi").unwrap();
+        let err =
+            resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), path.to_str().unwrap())
+                .unwrap_err();
+        assert_eq!(err, "unsupported audio file extension");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_is_denied() {
+        let dir = TempDir::new();
+        let outside = dir.path.join("outside").join("secret.wav");
+        std::fs::write(&outside, b"fake audio").unwrap();
+        let link = dir.allowed().join("link.wav");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err =
+            resolve_inside_allowed_dir(dir.allowed().to_str().unwrap(), link.to_str().unwrap())
+                .unwrap_err();
+        assert_eq!(err, "access denied: path outside allowed directory");
+    }
+
+    #[test]
+    fn queue_ids_are_bounded() {
+        assert!(validate_queue_id("abc-123").is_ok());
+        assert!(validate_queue_id("").is_err());
+        assert!(validate_queue_id(&"x".repeat(129)).is_err());
+        assert!(validate_queue_id("a\nb").is_err());
+        assert!(validate_queue_id("a\0b").is_err());
+    }
 }

@@ -7,6 +7,7 @@ mod auth;
 mod config;
 mod error;
 mod logging;
+mod security;
 mod web;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -18,6 +19,7 @@ use tower_http::{
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
+use api::{gate::InferenceGate, rate_limit::RateLimiter};
 use auth::store::TokenStore;
 use config::AppConfig;
 use sonicboom::tts;
@@ -37,6 +39,10 @@ pub struct AppState {
     /// Audio manager for server-side playback. `None` when the `playback` feature is disabled
     /// or when initialization fails.
     pub audio_manager: Arc<Option<AudioManager>>,
+    /// Bounded admission control for model inference (see [`InferenceGate`]).
+    pub inference_gate: Arc<InferenceGate>,
+    /// Per-token sliding-window rate limiter for expensive endpoints.
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 #[cfg(feature = "gui")]
@@ -57,6 +63,22 @@ fn main() -> anyhow::Result<()> {
     if let Err(e) = config.validate() {
         eprintln!("Configuration error: {e}");
         std::process::exit(1);
+    }
+
+    // Fail closed when the filesystem queue root is unusable.
+    #[cfg(feature = "playback")]
+    if let Some(dir) = config.allowed_audio_dir.as_deref() {
+        match std::path::Path::new(dir).canonicalize() {
+            Ok(canonical) if canonical.is_dir() => {}
+            Ok(_) => {
+                eprintln!("Configuration error: ALLOWED_AUDIO_DIR is not a directory");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Configuration error: cannot access ALLOWED_AUDIO_DIR: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Initialize logging
@@ -183,17 +205,24 @@ fn run_gui(config: Arc<AppConfig>) -> anyhow::Result<()> {
 }
 
 async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
+    // Fail closed on credential-store errors: a malformed or unreadable
+    // token file must never silently become an empty store. A missing file
+    // is initialized safely by `TokenStore::load`.
     let token_store = Arc::new(
         TokenStore::load(&config.token_store_path)
             .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Could not load token store from '{}': {e}. Starting with empty store.",
-                    config.token_store_path
-                );
-                TokenStore::empty()
-            }),
+            .map_err(|e| {
+                tracing::error!("Refusing to start: {e}");
+                e
+            })?,
     );
+
+    // Load the model integrity manifest early so a bad path fails fast.
+    let expected_hashes = config
+        .model_hashes_path
+        .as_deref()
+        .map(tts::download::load_expected_hashes)
+        .transpose()?;
 
     let model_status = Arc::new(RwLock::new(ModelStatus::Idle));
 
@@ -209,11 +238,22 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     #[cfg(not(feature = "playback"))]
     let audio_manager = Arc::new(None);
 
+    let inference_gate = Arc::new(InferenceGate::new(
+        config.max_concurrent_inference,
+        config.max_pending_inference,
+    ));
+    let rate_limiter = Arc::new(RateLimiter::new(
+        config.tts_rate_limit_requests,
+        config.tts_rate_limit_window_secs,
+    ));
+
     let app_state = AppState {
         model_status: Arc::clone(&model_status),
         token_store: Arc::clone(&token_store),
         config: Arc::clone(&config),
         audio_manager,
+        inference_gate,
+        rate_limiter,
     };
 
     let lockout = Arc::new(LoginAttemptTracker::default());
@@ -223,8 +263,19 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         config: Arc::clone(&config),
     };
 
+    // Hardened admin session cookie: HttpOnly, SameSite=Strict, optional
+    // Secure (enable via COOKIE_SECURE=true when serving HTTPS), and an
+    // inactivity expiry. Only the session id is stored client-side.
     let session_store = MemoryStore::default();
-    let session_layer = SessionManagerLayer::new(session_store);
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_name("sonicboom_admin")
+        .with_path("/")
+        .with_http_only(true)
+        .with_same_site(tower_sessions::cookie::SameSite::Strict)
+        .with_secure(config.cookie_secure)
+        .with_expiry(tower_sessions::Expiry::OnInactivity(
+            time::Duration::seconds(config.admin_session_expiry_secs),
+        ));
 
     let request_timeout = config.request_timeout_secs;
 
@@ -232,6 +283,7 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         .merge(web::router(app_state.clone()))
         .merge(api::router(app_state.clone()))
         .merge(admin::router(admin_state))
+        .layer(axum::middleware::from_fn(security::security_headers))
         .layer(session_layer)
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
@@ -250,13 +302,16 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
 
     let model_cache_dir = config.model_cache_dir.clone();
     let hf_token = config.hf_token.clone();
+    let model_revision = config.model_revision.clone();
     let model_status_bg = Arc::clone(&model_status);
     tokio::spawn(async move {
         *model_status_bg.write().await = ModelStatus::Downloading { progress: 0.0 };
         let status_for_progress = Arc::clone(&model_status_bg);
-        match download::download_models(
+        match download::download_models_with_options(
             std::path::Path::new(&model_cache_dir),
             hf_token.as_deref(),
+            &model_revision,
+            expected_hashes.as_ref(),
             move |progress| {
                 if let Ok(mut status) = status_for_progress.try_write() {
                     *status = ModelStatus::Downloading { progress };

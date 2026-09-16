@@ -83,24 +83,27 @@ fn map_voice(openai_voice: &str) -> String {
 /// Synthesize speech using OpenAI-compatible API
 #[allow(clippy::unused_async)]
 pub async fn post_speech(
-    _token: AuthenticatedToken,
+    token: AuthenticatedToken,
     State(state): State<crate::AppState>,
     body: String,
 ) -> Result<impl IntoResponse, AppError> {
+    if !state.rate_limiter.allow(&token.rate_limit_key()) {
+        return Err(AppError::TooManyRequests(
+            "Rate limit exceeded. Try again later.".to_string(),
+        ));
+    }
+
     let request: SpeechRequest = serde_json::from_str(&body)
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON in request body: {e}")))?;
 
-    if request.input.trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "Input text cannot be empty.".to_string(),
-        ));
-    }
-    if request.input.len() > state.config.max_text_length {
-        return Err(AppError::BadRequest(format!(
-            "Input text exceeds maximum length of {} characters.",
-            state.config.max_text_length
-        )));
-    }
+    sonicboom::engine::validate_tts_input(
+        &request.input,
+        "en",
+        &request.voice,
+        state.config.inference_steps,
+        state.config.max_text_length,
+    )
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     let model_handle = {
         let status = state.model_status.read().await;
@@ -123,9 +126,8 @@ pub async fn post_speech(
                 ));
             }
             ModelStatus::Failed(reason) => {
-                return Err(AppError::Internal(format!(
-                    "Model failed to load: {reason}"
-                )));
+                tracing::error!("openai tts request while model failed: {reason}");
+                return Err(AppError::internal("model unavailable"));
             }
         }
     };
@@ -139,26 +141,40 @@ pub async fn post_speech(
     } else {
         model_handle
             .default_voice()
-            .ok_or_else(|| AppError::Internal("No voice styles available.".to_string()))?
+            .ok_or_else(|| AppError::internal("no voice styles available"))?
             .to_string()
     };
 
     let lang = "en".to_string(); // Default language
     let sample_rate = model_handle.sample_rate();
     let inference_steps = state.config.inference_steps;
+    let max_chunk_chars = state.config.max_chunk_chars;
 
     // Determine output format
     let format = audio::AudioFormat::parse(&request.response_format);
 
+    let _permit = state.inference_gate.admit().await.ok_or_else(|| {
+        AppError::TooManyRequests(
+            "Server is busy. Too many pending inference requests.".to_string(),
+        )
+    })?;
+
     let samples = tokio::task::spawn_blocking(move || {
-        inference::synthesize(&model_handle, &text, &lang, &voice_name, inference_steps)
+        inference::synthesize(
+            &model_handle,
+            &text,
+            &lang,
+            &voice_name,
+            inference_steps,
+            max_chunk_chars,
+        )
     })
     .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    .map_err(|e| AppError::internal(format!("inference task failed: {e}")))?
+    .map_err(|e| AppError::internal(e.to_string()))?;
 
     let audio_bytes = audio::encode_audio(&samples, sample_rate, format)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|e| AppError::internal(e.to_string()))?;
 
     Ok((
         StatusCode::OK,

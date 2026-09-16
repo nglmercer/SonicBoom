@@ -1,6 +1,6 @@
 use axum::{
     extract::{ConnectInfo, Form, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -9,11 +9,8 @@ use std::{net::SocketAddr, sync::Arc};
 use tower_sessions::Session;
 
 use crate::{
-    admin::{lockout::LoginAttemptTracker, session, templates},
-    auth::{
-        store::TokenStore,
-        token::{Token, generate_token_value},
-    },
+    admin::{client_ip, lockout::LoginAttemptTracker, session, templates},
+    auth::store::TokenStore,
     config::AppConfig,
 };
 
@@ -40,16 +37,20 @@ pub struct LoginForm {
 pub async fn post_login(
     State(state): State<AdminState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     session: Session,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let ip = addr.ip();
+    let ip = client_ip::client_ip(&headers, addr, &state.config);
 
     if state.lockout.is_locked(ip) {
-        return Html(templates::login_page(Some(
-            "Too many failed attempts. Access blocked.",
-        )))
-        .into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Html(templates::login_page(Some(
+                "Too many failed attempts. Try again later.",
+            ))),
+        )
+            .into_response();
     }
 
     // Constant-time comparison to prevent timing attacks on credential validation
@@ -60,17 +61,31 @@ pub async fn post_login(
 
     if id_match && pw_match {
         state.lockout.record_success(ip);
+        session::rotate_id(&session).await;
         session::set_authenticated(&session, true).await;
         Redirect::to("/admin").into_response()
     } else {
         state.lockout.record_failure(ip);
-        Html(templates::login_page(Some("Invalid credentials."))).into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Html(templates::login_page(Some("Invalid credentials."))),
+        )
+            .into_response()
     }
 }
 
-pub async fn get_logout(session: Session) -> Redirect {
+#[derive(Deserialize)]
+pub struct CsrfForm {
+    pub csrf_token: Option<String>,
+}
+
+pub async fn post_logout(session: Session, Form(form): Form<CsrfForm>) -> Response {
+    let submitted = form.csrf_token.as_deref().unwrap_or("");
+    if !session::validate_csrf(&session, submitted).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     session::destroy(&session).await;
-    Redirect::to("/admin/login")
+    Redirect::to("/admin/login").into_response()
 }
 
 pub async fn get_admin(State(state): State<AdminState>, session: Session) -> Response {
@@ -79,12 +94,14 @@ pub async fn get_admin(State(state): State<AdminState>, session: Session) -> Res
     }
 
     let tokens = state.token_store.list().await;
-    Html(templates::admin_page(&tokens)).into_response()
+    let csrf = session::csrf_token(&session).await;
+    Html(templates::admin_page(&tokens, &csrf, None)).into_response()
 }
 
 #[derive(Deserialize)]
 pub struct CreateTokenForm {
     pub expires_at: Option<String>,
+    pub csrf_token: Option<String>,
 }
 
 pub async fn post_create_token(
@@ -94,6 +111,10 @@ pub async fn post_create_token(
 ) -> Response {
     if !session::is_authenticated(&session).await {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let submitted = form.csrf_token.as_deref().unwrap_or("");
+    if !session::validate_csrf(&session, submitted).await {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     let expires_at = form
@@ -106,22 +127,38 @@ pub async fn post_create_token(
                 .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
         });
 
-    let token = Token::new(generate_token_value(), expires_at);
-    if let Err(e) = state.token_store.add(token).await {
-        tracing::error!("Failed to save token: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    let (token, raw) = match state.token_store.create(expires_at).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!("Failed to save token: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let _ = token;
 
-    Redirect::to("/admin").into_response()
+    // Show the raw token exactly once; it is never persisted or re-displayed.
+    let tokens = state.token_store.list().await;
+    let csrf = session::csrf_token(&session).await;
+    Html(templates::admin_page(&tokens, &csrf, Some(&raw))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RevokeTokenForm {
+    pub csrf_token: Option<String>,
 }
 
 pub async fn post_revoke_token(
     State(state): State<AdminState>,
     session: Session,
     Path(id): Path<String>,
+    Form(form): Form<RevokeTokenForm>,
 ) -> Response {
     if !session::is_authenticated(&session).await {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let submitted = form.csrf_token.as_deref().unwrap_or("");
+    if !session::validate_csrf(&session, submitted).await {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     if let Err(e) = state.token_store.revoke(&id).await {

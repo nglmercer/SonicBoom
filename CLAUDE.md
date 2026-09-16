@@ -21,11 +21,11 @@
   - 실행 방법에 따라 샘플 토큰을 사용할 수 있어야 함 (`Authorization: Bearer SAMPLE_TOKEN`)
     - 환경변수로 `ENABLE_SAMPLE_TOKEN`에 `1`을 설정
   - 관리자 계정은 `SONICBOOM_ADMIN_ID` 및 `SONICBOOM_ADMIN_PW` 환경변수로 설정
-    - 기본값은 `admin` 및 `1234`
-    - 5번 연속으로 실패하면 해당 IP에서 로그인 차단, 어딘가에 이 상태를 저장할 필요는 없고 서버가 떠 있는 동안에만 하면 됨
+    - 보안 정책: 기본 비밀번호 없음. `SONICBOOM_ADMIN_PW` 미설정/취약 시 서버 시작 실패 (12자 이상)
+    - 10분 내 5번 실패하면 해당 IP에서 15분간 로그인 차단 후 자동 해제 (서버가 떠 있는 동안만 메모리 유지)
 - / 페이지에서 테스트 해볼 수 있음
   - 텍스트, 음성모델, 속도 등 선택 후 재생하는 기능
-  - /api/tts 에서 Referer가 자기 자신이면 Authorization 없이도 결과값 반환
+  - / 페이지에서 API 토큰을 입력받아 `Authorization: Bearer` 헤더로 전송 (Referer/Host 기반 우회 금지)
 
 ## 중요 사항
 - Git 커밋은 Claude가 하지 않는다.

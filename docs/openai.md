@@ -41,10 +41,10 @@ Synthesizes text to speech using OpenAI-compatible request format.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `model` | string | No | `tts-1` | Model ID (ignored, Supertonic 2 used) |
+| `model` | string | No | `tts-1` | Model ID (ignored, Supertonic 3 used) |
 | `input` | string | Yes | - | Text to synthesize |
 | `voice` | string | No | `alloy` | Voice to use |
-| `response_format` | string | No | `opus` | Output format (opus, mp3, wav, aac, flac) |
+| `response_format` | string | No | `opus` | Output format (opus, mp3, wav, flac) |
 | `speed` | number | No | `1.0` | Speech speed (not implemented) |
 
 **Response:** Audio data in specified format
