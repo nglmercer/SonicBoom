@@ -48,6 +48,44 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      # Explicit regression mapping for the production-hardening pass.
+      # These tests also run inside `cargo test --all-targets` above; this
+      # step additionally fails if any of them is ever renamed or removed
+      # (libtest passes silently on unmatched filters, hence the loop).
+      - name: Security regression tests
+        run: |
+          set -e
+          for t in \
+            cancellation_does_not_release_running_permit \
+            cancellation_with_pending_queue_keeps_running_slot \
+            spoofed_leftmost_entry_cannot_be_selected \
+            multiple_trusted_proxies_skipped_right_to_left \
+            malformed_chain_fails_safe \
+            multiple_xff_headers_do_not_allow_spoofing \
+            enqueue_rejects_beyond_bound_without_dropping \
+            dead_audio_thread_reports_unavailable_on_every_operation \
+            stop_clears_current_and_queued_temps \
+            sweep_deletes_only_owned_uuid_wavs \
+            failed_create_does_not_touch_live_memory \
+            failed_revoke_leaves_token_active_in_memory \
+            malformed_integers_fail_parsing_instead_of_defaulting \
+            malformed_booleans_fail_parsing_instead_of_defaulting \
+            resource_limits_have_upper_bounds \
+            content_length_mismatch_is_rejected \
+            oversized_stream_is_aborted_and_cleaned \
+            download_timeout_cleans_temporary_file \
+            unknown_models_are_rejected \
+            unknown_voices_are_rejected_not_defaulted \
+            unknown_formats_are_rejected_not_defaulted \
+            malformed_expiry_is_rejected_not_perpetual \
+            hostile_voice_names_are_escaped \
+            volume_accepts_only_finite_unit_range \
+          ; do
+            echo "--- $t"
+            cargo test --locked --all-targets -- "$t" 2>&1 | tee /tmp/regression.log | grep -q 'test result: ok. 1 passed' \
+              || { echo "ERROR: regression test '$t' did not run exactly once" >&2; exit 1; }
+          done
+
       - name: Audit dependencies
         # Gate on the `unmaintained` and `unsound` advisory categories. The
         # `yanked` check is intentionally NOT denied: the only yanked crates
@@ -131,6 +169,49 @@ jobs:
       - name: Check ${{ matrix.features }}
         run: cargo check --locked ${{ matrix.args }} --all-targets
 
+  # The desktop tray on Linux is pure-Rust StatusNotifierItem (ksni): no GTK
+  # system libraries are needed. Never reintroduce a GTK build dependency.
+  build-gui:
+    name: Build GUI (Linux tray)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-gui
+
+      - name: Install ALSA development libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Linux GUI graph must not contain glib
+        run: |
+          set -e
+          if cargo tree --locked --features gui --target x86_64-unknown-linux-gnu -i glib 2>/dev/null | grep -q 'glib v'; then
+            echo "ERROR: glib present in Linux GUI dependency graph" >&2
+            exit 1
+          fi
+          echo "OK: no glib in Linux GUI graph"
+
+      - name: Clippy (GUI)
+        run: cargo clippy --locked --features gui --all-targets -- -D warnings
+
+      - name: Test (GUI)
+        run: cargo test --locked --features gui
+
+      - name: Build release (GUI)
+        run: cargo build --release --locked --features gui
+
   docker-cpu:
     name: Docker CPU build
     runs-on: ubuntu-24.04
@@ -148,6 +229,61 @@ jobs:
           USER="$(docker inspect sonicboom:cpu --format '{{.Config.User}}')"
           echo "image user: $USER"
           test "$USER" = "sonicboom"
+
+      - name: Verify no unresolved shared libraries
+        run: |
+          docker run --rm --entrypoint /bin/sh sonicboom:cpu -c \
+            'ldd /app/sonicboom | grep "not found" && exit 1 || echo "OK: ldd clean"'
+
+      - name: Verify CPU runtime starts
+        run: |
+          docker run -d --name sonicboom-ci -p 127.0.0.1:3000:3000 \
+            -e SONICBOOM_ADMIN_PW=ci-local-testing-password-123 \
+            sonicboom:cpu
+          sleep 8
+          curl -fsS http://127.0.0.1:3000/health
+          docker stop sonicboom-ci
+          docker rm sonicboom-ci
+
+  docker-playback:
+    name: Docker playback build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build playback image
+        run: docker build --target runtime-playback -t sonicboom:playback .
+
+      - name: Verify non-root user and ALSA runtime
+        run: |
+          USER="$(docker inspect sonicboom:playback --format '{{.Config.User}}')"
+          echo "image user: $USER"
+          test "$USER" = "sonicboom"
+          docker run --rm --entrypoint /bin/sh sonicboom:playback -c \
+            'ldd /app/sonicboom | grep "not found" && exit 1 || echo "OK: ldd clean"'
+          docker run --rm --entrypoint /bin/sh sonicboom:playback -c \
+            'ldconfig -p | grep -q libasound || exit 1; echo "OK: ALSA present"'
+
+  docker-cuda:
+    name: Docker CUDA structural check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build CUDA image
+        run: docker build --target runtime-cuda -t sonicboom:cuda .
+
+      - name: Verify CUDA provider libraries resolve
+        run: |
+          USER="$(docker inspect sonicboom:cuda --format '{{.Config.User}}')"
+          echo "image user: $USER"
+          test "$USER" = "sonicboom"
+          docker run --rm --entrypoint /bin/sh sonicboom:cuda -c \
+            'test -f /app/ort-lib/libonnxruntime_providers_shared.so && test -f /app/ort-lib/libonnxruntime_providers_cuda.so && echo "OK: providers staged"'
+          docker run --rm --entrypoint /bin/sh sonicboom:cuda -c \
+            'ldd /app/sonicboom | grep "not found" && exit 1 || echo "OK: ldd clean"'
+          docker run --rm --entrypoint /bin/sh sonicboom:cuda -c \
+            'for p in /app/ort-lib/*.so; do ldd "$p" | grep -q "not found" && { echo "unresolved deps in $p"; exit 1; }; done; echo "OK: providers resolve"'
 
   dockerfile-lint:
     name: Dockerfile structure checks
@@ -189,6 +325,26 @@ jobs:
           # The final stage must be the headless CPU runtime so a plain
           # `docker build .` never produces a CUDA image by accident.
           test "$(grep '^FROM .* AS ' Dockerfile | tail -1 | awk '{print $NF}')" = "runtime"
+          # Builders must share the runtime's libc generation (Ubuntu 24.04):
+          # never build on a newer distro than the runtime.
+          if grep -nE '^FROM rust:' Dockerfile; then
+            echo "ERROR: builder must be Ubuntu 24.04-based, not rust:<debian>" >&2
+            exit 1
+          fi
+          grep -q 'AS builder$' Dockerfile
+          grep -q 'AS builder-playback' Dockerfile
+          grep -q 'AS builder-cuda' Dockerfile
+
+      - name: Production Compose must bind loopback by default
+        run: |
+          set -e
+          # Every published backend port must default to 127.0.0.1 (explicit
+          # BIND_ADDR override stays possible for intentional LAN exposure).
+          test "$(grep -c 'BIND_ADDR:-127.0.0.1' docker-compose.yml)" -eq 3
+          if grep -nE '"ports"|ports:' -A2 docker-compose.yml | grep -E '"[0-9]+:[0-9]+"'; then
+            echo "ERROR: Compose publishes a backend port on all interfaces by default" >&2
+            exit 1
+          fi
 
   supply-chain-guards:
     name: Supply-chain guards

@@ -43,8 +43,13 @@ SonicBoom is hardened for network-exposed deployment:
 - **Model supply chain**: model files are pinned to an immutable
   HuggingFace revision and verified against SHA-256 digests compiled into
   the binary before every load. Trust-on-first-use is not used.
-- **Resource limits**: bounded inference concurrency, per-token rate
-  limiting, request-body caps, and validated text/chunk sizes.
+- **Resource limits**: bounded inference concurrency (permits owned by
+  the blocking task, immune to request cancellation), per-token rate
+  limiting, request-body caps, validated text/chunk sizes, a bounded
+  playback queue, and byte/time-bounded model downloads.
+- **Fail-closed operations**: strict environment parsing (malformed
+  values refuse startup), transactional token mutations, and proxy
+  chains parsed from the trusted side.
 - **Containers** run as non-root with dropped capabilities,
   `no-new-privileges`, and digest-pinned base images.
 

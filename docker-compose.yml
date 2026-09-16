@@ -9,13 +9,23 @@
 # Token data lives in the named `tokendata` volume (created automatically),
 # so there is no missing-file bind problem. To seed from a local file once:
 #   printf '[]\n' > tokens.json   # then import via the admin panel
+#
+# Network exposure: backend ports bind to 127.0.0.1 by default. Do not
+# expose SonicBoom's plain HTTP backend directly to the public Internet —
+# terminate TLS at a reverse proxy, set COOKIE_SECURE=true for HTTPS, and
+# enable HSTS only when HTTPS is guaranteed (see docs/config.md).
 services:
   sonicboom:
     build:
       context: .
       target: runtime
+    # Loopback-only by default: the backend speaks plain HTTP, so it must
+    # not be published on all host interfaces. Terminate TLS at a reverse
+    # proxy on this host (or in this network) and forward to 127.0.0.1:3000.
+    # To expose on the LAN intentionally, override with e.g.:
+    #   ports: ["0.0.0.0:3000:3000"]   (or set BIND_ADDR=0.0.0.0 below)
     ports:
-      - "3000:3000"
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
       - ./models:/app/models
       - tokendata:/app/data
@@ -64,8 +74,10 @@ services:
     build:
       context: .
       target: runtime-playback
+    # Loopback-only by default (see `sonicboom` above for the rationale and
+    # how to intentionally expose on the LAN).
     ports:
-      - "3002:3000"
+      - "${BIND_ADDR:-127.0.0.1}:3002:3000"
     volumes:
       - ./models:/app/models
       - tokendata:/app/data
@@ -106,8 +118,10 @@ services:
     build:
       context: .
       target: runtime-cuda
+    # Loopback-only by default (see `sonicboom` above for the rationale and
+    # how to intentionally expose on the LAN).
     ports:
-      - "3001:3000"
+      - "${BIND_ADDR:-127.0.0.1}:3001:3000"
     volumes:
       - ./models:/app/models
       - tokendata:/app/data

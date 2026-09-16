@@ -15,6 +15,9 @@ pub struct RateLimiter {
     /// evicted when their window expires and the map is capped.
     hits: Mutex<HashMap<String, VecDeque<Instant>>>,
     max_keys: usize,
+    /// Last full-map expiry sweep. Sweeps are throttled so cleanup under
+    /// large key churn cannot create latency spikes on the global mutex.
+    last_sweep: Mutex<Instant>,
 }
 
 impl RateLimiter {
@@ -24,6 +27,7 @@ impl RateLimiter {
             window: Duration::from_secs(window_secs.max(1)),
             hits: Mutex::new(HashMap::new()),
             max_keys: 100_000,
+            last_sweep: Mutex::new(Instant::now()),
         }
     }
 
@@ -35,7 +39,20 @@ impl RateLimiter {
         }
         let now = Instant::now();
         let mut hits = self.hits.lock().unwrap_or_else(|e| e.into_inner());
-        // Opportunistic eviction of fully-expired keys (bounded work).
+        // Incremental expiry: once the map is half full, sweep expired keys
+        // at most once per window so no single request pays a full retain
+        // over 100k keys while the mutex is held.
+        if hits.len() >= self.max_keys / 2
+            && let Ok(mut last_sweep) = self.last_sweep.try_lock()
+            && now.duration_since(*last_sweep) >= self.window.min(Duration::from_secs(60))
+        {
+            hits.retain(|_, times| {
+                times.retain(|t| now.duration_since(*t) < self.window);
+                !times.is_empty()
+            });
+            *last_sweep = now;
+        }
+        // Opportunistic eviction of fully-expired keys when at capacity.
         if hits.len() >= self.max_keys {
             hits.retain(|_, times| {
                 times.retain(|t| now.duration_since(*t) < self.window);
@@ -89,6 +106,25 @@ mod tests {
             hits.insert("token-a".to_string(), queue);
         }
         assert!(limiter.allow("token-a"));
+    }
+
+    #[test]
+    fn periodic_sweep_reclaims_expired_keys_before_capacity() {
+        let limiter = RateLimiter::new(5, 60);
+        {
+            let mut hits = limiter.hits.lock().unwrap();
+            for i in 0..60_000 {
+                let mut queue = VecDeque::new();
+                queue.push_back(Instant::now() - Duration::from_secs(61));
+                hits.insert(format!("stale-{i}"), queue);
+            }
+            *limiter.last_sweep.lock().unwrap() = Instant::now() - Duration::from_secs(61);
+        }
+        assert!(limiter.allow("fresh"));
+        assert!(
+            limiter.hits.lock().unwrap().len() < 100,
+            "throttled sweep should have reclaimed expired keys"
+        );
     }
 
     #[test]

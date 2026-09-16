@@ -21,20 +21,28 @@
 # ============================================================================
 # Builder: headless CPU server (no ALSA / no local playback)
 # edition = "2024" requires rustc >= 1.85 (1.89+ for current locked deps)
+#
+# The builder is Ubuntu 24.04 — the same distro as the runtime stages — so
+# binaries can never link against a newer glibc than the runtime provides.
 # ============================================================================
-FROM rust:1.89-trixie@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9 AS builder
+FROM ubuntu:24.04@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9 AS builder
 
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ca-certificates \
     libopus-dev \
     pkg-config \
     libssl-dev \
     cmake \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain 1.89.0
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-# ort crate downloads a pinned prebuilt ONNX Runtime (see Cargo.lock: ort 2.0.0-rc.11)
+# ort crate downloads a pinned prebuilt ONNX Runtime (see Cargo.lock)
 ENV ORT_STRATEGY=download
 
 COPY Cargo.toml Cargo.lock ./
@@ -65,19 +73,26 @@ RUN set -eu; \
 
 # ============================================================================
 # Builder: server with local ALSA playback
+#
+# Ubuntu 24.04, matching the runtime: no newer-glibc-than-runtime risk.
 # ============================================================================
-FROM rust:1.89-trixie@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9 AS builder-playback
+FROM ubuntu:24.04@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9 AS builder-playback
 
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    ca-certificates \
     libopus-dev \
     libasound2-dev \
     pkg-config \
     libssl-dev \
     cmake \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain 1.89.0
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 ENV ORT_STRATEGY=download
 
@@ -113,6 +128,7 @@ WORKDIR /build
 
 # Rust 1.89 toolchain + native build deps on top of the CUDA devel image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     curl \
     ca-certificates \
     libopus-dev \

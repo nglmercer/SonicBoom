@@ -58,11 +58,7 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
 
     let model_ready = !voices.is_empty();
 
-    let voice_options: String = voices
-        .iter()
-        .map(|v| format!(r#"<option value="{v}">{v}</option>"#))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let voice_options: String = voice_options_html(&voices);
 
     let html = TEMPLATE
         .replace("STATUS_MSG", &status_msg)
@@ -90,9 +86,31 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+/// Render voice names as `<option>` elements. Model metadata is still
+/// data: names are escaped for both the attribute and text contexts so a
+/// hostile or surprising voice name can never break out of the markup.
+fn voice_options_html(voices: &[String]) -> String {
+    voices
+        .iter()
+        .map(|v| {
+            let escaped = html_escape(v);
+            format!(r#"<option value="{escaped}">{escaped}</option>"#)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TEMPLATE;
+    use super::{TEMPLATE, voice_options_html};
 
     #[test]
     fn index_template_has_no_inline_script_or_style() {
@@ -102,5 +120,35 @@ mod tests {
         assert!(TEMPLATE.contains(r#"<script src="/static/index.js" defer></script>"#));
         assert!(TEMPLATE.contains(r#"<link rel="stylesheet" href="/static/index.css">"#));
         assert!(TEMPLATE.contains("data-model-ready="));
+    }
+
+    #[test]
+    fn hostile_voice_names_are_escaped() {
+        let voices = vec![
+            "\"><script>alert(1)</script>".to_string(),
+            "A&B".to_string(),
+            "a<b>c".to_string(),
+            "quote\"test".to_string(),
+            "apostrophe'test".to_string(),
+            "M1".to_string(),
+        ];
+        let html = voice_options_html(&voices);
+        assert!(
+            !html.contains("<script>"),
+            "voice markup became executable: {html}"
+        );
+        assert!(!html.contains("\"><script>"), " breakout: {html}");
+        assert!(
+            html.contains("&quot;&gt;&lt;script&gt;"),
+            "missing escape: {html}"
+        );
+        assert!(html.contains("A&amp;B"), "missing escape: {html}");
+        assert!(html.contains("a&lt;b&gt;c"), "missing escape: {html}");
+        assert!(html.contains("quote&quot;test"), "missing escape: {html}");
+        assert!(
+            html.contains("apostrophe&#39;test"),
+            "missing escape: {html}"
+        );
+        assert!(html.contains(r#"<option value="M1">M1</option>"#));
     }
 }

@@ -1,4 +1,6 @@
 use anyhow::Result;
+#[cfg(any(target_os = "macos", feature = "cuda", feature = "rocm"))]
+use anyhow::anyhow;
 use ort::session::Session;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -103,31 +105,41 @@ impl ModelHandle {
 fn build_session(path: &std::path::Path) -> Result<Session> {
     let builder = Session::builder()?;
 
+    // NOTE: `with_execution_providers` returns a builder-carrying error that
+    // is not `Send + Sync`, so it cannot convert into `anyhow::Error` with
+    // `?` directly; render the provider message instead.
     #[cfg(target_os = "macos")]
     let builder = {
-        use ort::execution_providers::CoreMLExecutionProvider;
+        use ort::ep::CoreML;
         // Place .mlmodelc cache next to model file to prevent recompilation
         let cache_dir = path.with_extension("mlmodelc");
         let cache_dir_str = cache_dir.to_string_lossy().into_owned();
-        builder.with_execution_providers([CoreMLExecutionProvider::default()
-            .with_model_cache_dir(cache_dir_str)
-            .build()])?
+        builder
+            .with_execution_providers([CoreML::default()
+                .with_model_cache_dir(cache_dir_str)
+                .build()])
+            .map_err(|e| anyhow!("CoreML provider failed: {e}"))?
     };
 
     // NVIDIA CUDA acceleration (opt-in via `--features cuda`)
     #[cfg(feature = "cuda")]
     let builder = {
-        use ort::execution_providers::CUDAExecutionProvider;
-        builder.with_execution_providers([CUDAExecutionProvider::default().build()])?
+        use ort::ep::CUDA;
+        builder
+            .with_execution_providers([CUDA::default().build()])
+            .map_err(|e| anyhow!("CUDA provider failed: {e}"))?
     };
 
     // AMD ROCm acceleration (opt-in via `--features rocm`)
     #[cfg(feature = "rocm")]
     let builder = {
-        use ort::execution_providers::ROCmExecutionProvider;
-        builder.with_execution_providers([ROCmExecutionProvider::default().build()])?
+        use ort::ep::ROCm;
+        builder
+            .with_execution_providers([ROCm::default().build()])
+            .map_err(|e| anyhow!("ROCm provider failed: {e}"))?
     };
 
+    let mut builder = builder;
     Ok(builder.commit_from_file(path)?)
 }
 

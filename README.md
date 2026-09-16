@@ -40,10 +40,12 @@ cargo build --release --features gui
 ### Run
 
 ```bash
-# Set environment variables (admin password is REQUIRED, 12+ chars)
+# Set environment variables (admin password is REQUIRED, 12+ chars).
+# Generate one — never reuse a documented placeholder:
+#   python3 -c 'import secrets; print(secrets.token_urlsafe(24))'
 export PORT=3000
 export SONICBOOM_ADMIN_ID=admin
-export SONICBOOM_ADMIN_PW=your_strong_password_12_plus_chars
+export SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD>
 export ALLOWED_AUDIO_DIR=./audio   # required for playback builds
 
 # Run the server
@@ -67,14 +69,14 @@ The server will:
 ## Features
 
 - **ONNX Runtime Inference** - Supertonic 3 with hardware acceleration (CoreML on Apple Silicon, CUDA/ROCm on Linux via `--features cuda`/`--features rocm`)
-- **Streaming Audio Output** - Real-time Opus/OGG encoding
+- **Buffered Audio Output** - Opus/OGG, WAV, MP3, and FLAC audio output (each response is one fully encoded buffer, not an incremental stream)
 - **Token-Based Authentication** - API access control
 - **Verified Model Supply Chain** - Pinned revision with compiled-in SHA-256 integrity checks
 - **Admin Panel** - Web-based management interface
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI TTS
 - **Audio Queue System** - Play audio files directly on the server with queue management
 - **Session Management** - Secure admin sessions with lockout protection
-- **Desktop Tray (optional)** - System tray GUI via the `gui` feature (macOS/Windows/Linux)
+- **Desktop Tray (optional)** - System tray GUI via the `gui` feature (macOS/Windows/Linux; Linux uses StatusNotifierItem over D-Bus, no GTK build dependencies)
 
 ---
 
@@ -136,7 +138,7 @@ The server will:
 
 ```bash
 # Using original API
-# Audio is encoded as Opus inside an OGG container (Content-Type: audio/ogg).
+# Audio is encoded as Opus inside an OGG container (Content-Type: audio/ogg; codecs=opus).
 curl -X POST "http://localhost:3000/api/tts?voice=F1" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Hello, world!" \
@@ -212,9 +214,9 @@ SonicBoom/
 ```bash
 # Build and run with Docker (headless CPU server; no local playback)
 docker build -t sonicboom .
-docker run -p 3000:3000 \
+docker run -p 127.0.0.1:3000:3000 \
   -e SONICBOOM_ADMIN_ID=admin \
-  -e SONICBOOM_ADMIN_PW=your_strong_password_12_plus_chars \
+  -e SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD> \
   -e HF_TOKEN=your_hf_token \
   -v sonicboom-tokens:/app/data \
   sonicboom
@@ -228,7 +230,7 @@ docker build --target runtime-cuda -t sonicboom:cuda .
 Or use docker-compose:
 
 ```bash
-export SONICBOOM_ADMIN_PW=your_strong_password_12_plus_chars
+export SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD>
 docker compose up -d            # CPU server
 docker compose --profile playback up -d   # with local playback
 docker compose --profile cuda up -d       # CUDA server

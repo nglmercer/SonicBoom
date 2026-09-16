@@ -41,11 +41,11 @@ Synthesizes text to speech using OpenAI-compatible request format.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `model` | string | No | `tts-1` | Model ID (ignored, Supertonic 3 used) |
+| `model` | string | No | `tts-1` | Model ID: `tts-1`, `tts-1-hd`, or `supertonic-3` (anything else → `400`) |
 | `input` | string | Yes | - | Text to synthesize |
-| `voice` | string | No | `alloy` | Voice to use |
-| `response_format` | string | No | `opus` | Output format (opus, mp3, wav, flac) |
-| `speed` | number | No | `1.0` | Speech speed (not implemented) |
+| `voice` | string | No | `alloy` | Voice to use (unknown names → `400`, never a silent fallback) |
+| `response_format` | string | No | `opus` | Output format: `opus`, `mp3`, `wav`, `flac` (unknown → `400`) |
+| `speed` | number | No | `1.0` | Only `1.0` (or omitted) is accepted; anything else → `400` (speed adjustment is not implemented) |
 
 **Response:** Audio data in specified format
 
@@ -68,9 +68,10 @@ curl -X POST http://localhost:3000/v1/audio/speech \
 
 ## Voice Mapping
 
-SonicBoom maps OpenAI voice names to Supertonic 2 voice styles:
+SonicBoom maps OpenAI voice names to Supertonic 3 voice styles.
+Unknown voice values return `400 Bad Request`.
 
-| OpenAI Voice | Supertonic 2 | Description |
+| OpenAI Voice | Supertonic 3 | Description |
 |--------------|---------------|-------------|
 | `alloy` | M1 | Male voice 1 |
 | `echo` | M2 | Male voice 2 |
@@ -81,7 +82,7 @@ SonicBoom maps OpenAI voice names to Supertonic 2 voice styles:
 
 ### Direct Voice Names
 
-You can also use Supertonic 2 voice names directly:
+You can also use Supertonic 3 voice names directly (`M1`–`M5`, `F1`–`F5`):
 
 | Voice | Gender |
 |-------|--------|
@@ -104,7 +105,8 @@ You can also use Supertonic 2 voice names directly:
 
 Returns a list of available models.
 
-**Authentication:** Not required
+**Authentication:** Not required (public metadata endpoint exposing only
+non-sensitive model identifiers; see below)
 
 **Response:**
 
@@ -136,7 +138,8 @@ curl http://localhost:3000/v1/models
 
 Returns a list of available voices.
 
-**Authentication:** Not required
+**Authentication:** Not required (public metadata endpoint exposing only
+non-sensitive voice names; see below)
 
 **Response:**
 
@@ -163,6 +166,17 @@ Returns a list of available voices.
 ```bash
 curl http://localhost:3000/v1/voices
 ```
+
+---
+
+## Public Metadata Endpoints
+
+`GET /v1/models`, `GET /v1/models/list`, `GET /v1/voices` (and
+`GET /api/status`) intentionally require no authentication. They expose
+only non-sensitive data — model identifiers, voice names, load
+progress — and never tokens, credentials, paths, or model internals.
+Compatibility with OpenAI-style clients expects these to be public, so
+authentication is deliberately not required for them.
 
 ---
 
@@ -219,10 +233,11 @@ with open("output.ogg", "wb") as f:
 
 | Format | Content-Type | File Extension |
 |--------|--------------|----------------|
-| opus | `audio/ogg` | .ogg |
+| opus | `audio/ogg; codecs=opus` | .ogg |
 | mp3 | `audio/mpeg` | .mp3 |
 | wav | `audio/wav` | .wav |
-| aac | `audio/aac` | .aac |
 | flac | `audio/flac` | .flac |
 
-**Note:** SonicBoom internally uses Opus encoding. Other formats are transcoded.
+Unknown `response_format` values return `400 Bad Request`. Omitted
+formats default to `opus`. Each response is one fully encoded audio
+buffer (not an incremental stream).

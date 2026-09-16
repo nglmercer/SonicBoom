@@ -110,6 +110,9 @@ mod tests {
             admin_session_expiry_secs: 60,
             temp_audio_dir: "./temp_audio".to_string(),
             enable_hsts: false,
+            max_playback_queue_items: 100,
+            model_download_connect_timeout_secs: 10,
+            model_download_timeout_secs: 1800,
         }
     }
 

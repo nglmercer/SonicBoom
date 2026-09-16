@@ -117,15 +117,16 @@ pub async fn post_create_token(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let expires_at = form
-        .expires_at
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| {
-            NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
-                .ok()
-                .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
-        });
+    let expires_at = match parse_token_expiry(form.expires_at.as_deref()) {
+        Ok(expires_at) => expires_at,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html(templates::error_page(message)),
+            )
+                .into_response();
+        }
+    };
 
     let (token, raw) = match state.token_store.create(expires_at).await {
         Ok(pair) => pair,
@@ -140,6 +141,27 @@ pub async fn post_create_token(
     let tokens = state.token_store.list().await;
     let csrf = session::csrf_token(&session).await;
     Html(templates::admin_page(&tokens, &csrf, Some(&raw))).into_response()
+}
+
+/// Parse the admin `datetime-local` expiry field.
+///
+/// - Missing/blank → `None` (the token never expires).
+/// - Valid `YYYY-MM-DDTHH:MM` in the future → `Some(expiry)`. The field
+///   carries no timezone, so the server interprets it as UTC (documented
+///   on the form and in `docs/admin.md`).
+/// - Malformed or already past → `Err`, rendered as `400`. A typo must
+///   never silently mint a perpetual token.
+pub fn parse_token_expiry(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, &'static str> {
+    let Some(text) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let naive = NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M")
+        .map_err(|_| "expiry must look like YYYY-MM-DDTHH:MM")?;
+    let expiry = DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    if expiry <= Utc::now() {
+        return Err("expiry must be in the future");
+    }
+    Ok(Some(expiry))
 }
 
 #[derive(Deserialize)]
@@ -167,4 +189,49 @@ pub async fn post_revoke_token(
     }
 
     Redirect::to("/admin").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_token_expiry;
+
+    #[test]
+    fn blank_expiry_means_no_expiry() {
+        assert_eq!(parse_token_expiry(None), Ok(None));
+        assert_eq!(parse_token_expiry(Some("")), Ok(None));
+        assert_eq!(parse_token_expiry(Some("   ")), Ok(None));
+    }
+
+    #[test]
+    fn future_expiry_parses_as_utc() {
+        let expiry = parse_token_expiry(Some("2999-01-02T03:04"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(expiry.to_rfc3339(), "2999-01-02T03:04:00+00:00");
+    }
+
+    #[test]
+    fn malformed_expiry_is_rejected_not_perpetual() {
+        for bad in [
+            "banana",
+            "2026-13-01T00:00",
+            "2026-01-01",
+            "2026-01-01T25:00",
+            "2026-01-01 00:00",
+            "2999-01-02T03:04:05",
+            "2999-01-02T03:04+00:00",
+        ] {
+            assert!(
+                parse_token_expiry(Some(bad)).is_err(),
+                "expiry {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn past_and_present_expiry_is_rejected() {
+        assert!(parse_token_expiry(Some("2000-01-01T00:00")).is_err());
+        // Far past with valid syntax is still rejected.
+        assert!(parse_token_expiry(Some("1970-01-01T00:00")).is_err());
+    }
 }

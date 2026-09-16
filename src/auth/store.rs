@@ -27,9 +27,16 @@ impl TokenStore {
                 let token_list: Vec<Token> = serde_json::from_str(&data)
                     .with_context(|| format!("failed to parse token store '{path}'"))?;
                 let mut tokens = HashMap::with_capacity(token_list.len());
+                let mut seen_ids = std::collections::HashSet::with_capacity(token_list.len());
                 for token in token_list {
                     validate_stored_token(&token)
                         .with_context(|| format!("invalid token record '{}'", token.id))?;
+                    if !seen_ids.insert(token.id.clone()) {
+                        anyhow::bail!("duplicate token id '{}'", token.id);
+                    }
+                    if tokens.contains_key(&token.token_hash) {
+                        anyhow::bail!("duplicate token_hash for token id '{}'", token.id);
+                    }
                     tokens.insert(token.token_hash.clone(), token);
                 }
                 Ok(Self {
@@ -83,25 +90,37 @@ impl TokenStore {
     /// Generate a fresh token, persist only its hash, and return the raw
     /// value exactly once. The caller must display it to the operator now:
     /// it can never be recovered afterwards.
+    ///
+    /// The mutation is transactional: a candidate state is built from the
+    /// live map, persisted, and only then swapped into memory. If
+    /// persistence fails, the live map is untouched, so memory and disk can
+    /// never disagree after a failed write. Mutations are serialized under
+    /// the write lock so concurrent creates/revokes cannot lose updates.
     pub async fn create(&self, expires_at: Option<DateTime<Utc>>) -> Result<(Token, String)> {
         let raw = generate_token_value();
         let token = Token::new(hash_token_value(&raw), expires_at);
-        let mut tokens = self.tokens.write().await;
-        tokens.insert(token.token_hash.clone(), token.clone());
-        self.save_locked(&tokens).await?;
+        let mut live = self.tokens.write().await;
+        let mut candidate = live.clone();
+        candidate.insert(token.token_hash.clone(), token.clone());
+        Self::persist_to_path(&self.path, &candidate).await?;
+        *live = candidate;
         Ok((token, raw))
     }
 
     pub async fn revoke(&self, id: &str) -> Result<bool> {
-        let mut tokens = self.tokens.write().await;
-        // Find token by id and revoke it
-        if let Some(token) = tokens.values_mut().find(|t| t.id == id) {
-            token.revoked = true;
-            self.save_locked(&tokens).await?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let mut live = self.tokens.write().await;
+        if !live.values().any(|t| t.id == id) {
+            return Ok(false);
         }
+        // Clone-modify-persist-swap: a failed disk write leaves the token
+        // active in memory (matching disk), never revoked-then-resurrected.
+        let mut candidate = live.clone();
+        if let Some(token) = candidate.values_mut().find(|t| t.id == id) {
+            token.revoked = true;
+        }
+        Self::persist_to_path(&self.path, &candidate).await?;
+        *live = candidate;
+        Ok(true)
     }
 
     /// Write a brand-new store file for the missing-file case.
@@ -109,25 +128,45 @@ impl TokenStore {
         if self.path.is_empty() {
             return Ok(());
         }
-        self.save_locked(&HashMap::new()).await
+        Self::persist_to_path(&self.path, &HashMap::new()).await
     }
 
-    /// Atomically persist the store: write temp file, fsync, rename.
-    /// The file is created with `0600` permissions on Unix.
-    async fn save_locked(&self, tokens: &HashMap<String, Token>) -> Result<()> {
-        if self.path.is_empty() {
+    /// Atomically persist `tokens` to `path`: write temp file (0600 on
+    /// Unix), fsync, rename, then fsync the parent directory on Unix so a
+    /// crash cannot lose a revocation that reported success. Pure function
+    /// of its arguments: it never touches live memory, which is what makes
+    /// create/revoke transactional.
+    async fn persist_to_path(path: &str, tokens: &HashMap<String, Token>) -> Result<()> {
+        if path.is_empty() {
             return Ok(()); // No path set (empty store), skip saving
         }
         let token_list: Vec<&Token> = tokens.values().collect();
         let data = serde_json::to_string_pretty(&token_list)?;
-        let tmp_path = format!("{}.tmp", self.path);
+        let tmp_path = format!("{path}.tmp");
         write_restricted_file(&tmp_path, data.as_bytes())
             .await
-            .with_context(|| format!("failed to write token store '{}'", self.path))?;
-        tokio::fs::rename(&tmp_path, &self.path)
+            .with_context(|| format!("failed to write token store '{path}'"))?;
+        tokio::fs::rename(&tmp_path, path)
             .await
-            .with_context(|| format!("failed to replace token store '{}'", self.path))?;
+            .with_context(|| format!("failed to replace token store '{path}'"))?;
+        sync_parent_dir(path);
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn for_test_with_path(path: &str) -> Self {
+        Self {
+            tokens: Arc::new(RwLock::new(HashMap::new())),
+            path: path.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    async fn insert_test_token(&self, token: Token) {
+        self.tokens
+            .write()
+            .await
+            .insert(token.token_hash.clone(), token);
     }
 }
 
@@ -135,11 +174,42 @@ fn validate_stored_token(token: &Token) -> Result<()> {
     if token.id.is_empty() || token.id.len() > 128 {
         return Err(anyhow!("token id has invalid length"));
     }
-    if token.token_hash.len() != 64 || !token.token_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+    // Strict lowercase: the application only ever generates lowercase hex,
+    // so anything else is foreign data failing closed.
+    if token.token_hash.len() != 64
+        || !token
+            .token_hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+    {
         return Err(anyhow!("token_hash must be 64 lowercase hex chars"));
     }
     Ok(())
 }
+
+/// Sync the directory containing `path` so the rename above is durable.
+/// Best-effort: filesystems that cannot sync directories must not fail an
+/// otherwise successful write, but the attempt is always made on Unix.
+#[cfg(unix)]
+fn sync_parent_dir(path: &str) {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    match std::fs::File::open(parent) {
+        Ok(dir) => {
+            if let Err(e) = dir.sync_all() {
+                tracing::warn!("failed to sync token store directory: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("failed to open token store directory for sync: {e}");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &str) {}
 
 #[cfg(unix)]
 async fn write_restricted_file(path: &str, data: &[u8]) -> Result<()> {
@@ -263,5 +333,104 @@ mod tests {
         // File was created safely.
         let data = tokio::fs::read_to_string(path.as_str()).await.unwrap();
         assert_eq!(data.trim(), "[]");
+    }
+
+    #[tokio::test]
+    async fn uppercase_hash_records_are_rejected() {
+        let path = tempfile_path::TempPath::new();
+        let upper = hash_token_value("x").to_uppercase();
+        assert_ne!(upper, hash_token_value("x"));
+        let record = serde_json::json!([{
+            "id": "abc",
+            "token_hash": upper,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": null,
+            "revoked": false,
+        }]);
+        tokio::fs::write(path.as_str(), record.to_string())
+            .await
+            .unwrap();
+        let err = match TokenStore::load(path.as_str()).await {
+            Ok(_) => panic!("uppercase token_hash must fail the lowercase policy it claims"),
+            Err(err) => err,
+        };
+        assert!(format!("{err:?}").contains("lowercase"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn duplicate_ids_and_hashes_are_rejected() {
+        let path = tempfile_path::TempPath::new();
+        let hash = hash_token_value("x");
+        let dup_id = serde_json::json!([
+            {"id": "same", "token_hash": hash, "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "revoked": false},
+            {"id": "same", "token_hash": hash_token_value("y"), "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "revoked": false},
+        ]);
+        tokio::fs::write(path.as_str(), dup_id.to_string())
+            .await
+            .unwrap();
+        assert!(TokenStore::load(path.as_str()).await.is_err());
+
+        let dup_hash = serde_json::json!([
+            {"id": "one", "token_hash": hash, "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "revoked": false},
+            {"id": "two", "token_hash": hash, "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "revoked": false},
+        ]);
+        tokio::fs::write(path.as_str(), dup_hash.to_string())
+            .await
+            .unwrap();
+        assert!(TokenStore::load(path.as_str()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_create_does_not_touch_live_memory() {
+        // A NUL byte makes every filesystem operation fail deterministically
+        // on all platforms (no chmod tricks that root would ignore).
+        let store = TokenStore::for_test_with_path("sonicboom-\0-invalid/tokens.json");
+        let err = store.create(None).await.expect_err("create must fail");
+        assert!(
+            err.to_string().contains("failed to write token store"),
+            "unexpected: {err}"
+        );
+        assert!(
+            store.list().await.is_empty(),
+            "failed create leaked into live memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_revoke_leaves_token_active_in_memory() {
+        let store = TokenStore::for_test_with_path("sonicboom-\0-invalid/tokens.json");
+        let raw = generate_token_value();
+        let token = Token::new(hash_token_value(&raw), None);
+        let id = token.id.clone();
+        store.insert_test_token(token).await;
+        assert!(store.validate(&raw).await);
+
+        let err = store.revoke(&id).await.expect_err("revoke must fail");
+        assert!(
+            err.to_string().contains("failed to write token store"),
+            "unexpected: {err}"
+        );
+        // Memory still matches disk (active): no revoke-then-resurrect.
+        assert!(
+            store.validate(&raw).await,
+            "failed revoke altered live memory"
+        );
+        assert!(!store.list().await[0].revoked);
+    }
+
+    #[tokio::test]
+    async fn restart_state_matches_process_visible_state() {
+        let path = tempfile_path::TempPath::new();
+        let store = TokenStore::load(path.as_str()).await.unwrap();
+        let (token, raw) = store.create(None).await.unwrap();
+        assert!(store.validate(&raw).await);
+        assert!(store.revoke(&token.id).await.unwrap());
+        assert!(!store.validate(&raw).await);
+
+        // Reload from disk: identical to what the process observed.
+        let reloaded = TokenStore::load(path.as_str()).await.unwrap();
+        assert_eq!(reloaded.list().await.len(), 1);
+        assert!(!reloaded.validate(&raw).await);
+        assert!(reloaded.list().await[0].revoked);
     }
 }

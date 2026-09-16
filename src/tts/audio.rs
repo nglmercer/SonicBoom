@@ -13,13 +13,33 @@ pub enum AudioFormat {
     Flac,
 }
 
+/// Request-controlled format value that matched nothing supported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAudioFormat(pub String);
+
+impl std::fmt::Display for UnknownAudioFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unsupported audio format '{}' (expected one of: opus, wav, mp3, flac)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownAudioFormat {}
+
 impl AudioFormat {
-    pub fn parse(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "wav" => AudioFormat::Wav,
-            "mp3" => AudioFormat::Mp3,
-            "flac" => AudioFormat::Flac,
-            _ => AudioFormat::Opus,
+    /// Parse a caller-supplied format name. Unknown values are an error —
+    /// they must never silently become Opus. Callers apply the Opus default
+    /// only when the parameter is omitted entirely.
+    pub fn parse(s: &str) -> Result<Self, UnknownAudioFormat> {
+        match s.trim().to_lowercase().as_str() {
+            "opus" => Ok(AudioFormat::Opus),
+            "wav" => Ok(AudioFormat::Wav),
+            "mp3" => Ok(AudioFormat::Mp3),
+            "flac" => Ok(AudioFormat::Flac),
+            _ => Err(UnknownAudioFormat(s.to_string())),
         }
     }
 
@@ -262,4 +282,62 @@ fn encode_flac(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("FLAC stream write failed: {:?}", e))?;
 
     Ok(sink.as_slice().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_formats_parse_case_insensitively() {
+        assert_eq!(AudioFormat::parse("opus"), Ok(AudioFormat::Opus));
+        assert_eq!(AudioFormat::parse("OPUS"), Ok(AudioFormat::Opus));
+        assert_eq!(AudioFormat::parse("wav"), Ok(AudioFormat::Wav));
+        assert_eq!(AudioFormat::parse("Wav"), Ok(AudioFormat::Wav));
+        assert_eq!(AudioFormat::parse("mp3"), Ok(AudioFormat::Mp3));
+        assert_eq!(AudioFormat::parse("flac"), Ok(AudioFormat::Flac));
+        assert_eq!(AudioFormat::parse("  opus  "), Ok(AudioFormat::Opus));
+    }
+
+    #[test]
+    fn unknown_formats_are_rejected_not_defaulted() {
+        for bad in ["banana", "aac", "ogg", "", "opus2", "wave", "mp4"] {
+            assert!(
+                AudioFormat::parse(bad).is_err(),
+                "format {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn opus_encoder_produces_valid_ogg_container() {
+        // 1 second of silence at the model-native rate, upsampled to 48k.
+        let samples = vec![0.0f32; 24_000];
+        let bytes = encode_opus(&samples, 24_000).expect("opus encode must succeed");
+        assert!(!bytes.is_empty());
+        // OGG magic + OpusHead identification header.
+        assert_eq!(&bytes[0..4], b"OggS");
+        assert!(
+            bytes.windows(8).any(|w| w == b"OpusHead"),
+            "missing OpusHead header"
+        );
+    }
+
+    #[test]
+    fn all_formats_encode_without_error() {
+        let samples = vec![0.25f32; 480];
+        for format in [
+            AudioFormat::Opus,
+            AudioFormat::Wav,
+            AudioFormat::Mp3,
+            AudioFormat::Flac,
+        ] {
+            let bytes = encode_audio(&samples, 24_000, format)
+                .unwrap_or_else(|_| panic!("{format:?} encode must succeed"));
+            assert!(!bytes.is_empty(), "{format:?} produced no output");
+        }
+        // WAV magic check as a container sanity anchor.
+        let wav = encode_audio(&samples, 24_000, AudioFormat::Wav).unwrap();
+        assert_eq!(&wav[0..4], b"RIFF");
+    }
 }

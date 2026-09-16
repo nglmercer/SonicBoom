@@ -36,11 +36,12 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
-      # The `gui` feature (tao/tray-icon) requires GTK 3 and the X11/input
-      # development libraries that winit/tao link against on Linux.
-      - name: Install GTK 3 development libraries (Linux)
-        if: matrix.os == 'ubuntu-24.04'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libatk1.0-dev libgdk-pixbuf2.0-dev libx11-dev libxkbcommon-dev libxrandr-dev libxinerama-dev libxcursor-dev libxxf86vm-dev libxdo-dev
+      # NOTE: the Linux `gui` tray is pure-Rust StatusNotifierItem (ksni);
+      # it needs no GTK/X11 development libraries. Do not reintroduce them.
+
+      # Exercise the exact feature combination before publishing it.
+      - name: Test release feature combination
+        run: cargo test --locked --features gui --target ${{ matrix.target }}
 
       - name: Build release with GUI
         run: cargo build --release --locked --features gui --target ${{ matrix.target }}
@@ -64,6 +65,13 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
+
+      - name: Generate checksums
+        run: |
+          set -e
+          cd artifacts
+          find . -type f -not -name 'SHA256SUMS' -exec sha256sum {} + | sort > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

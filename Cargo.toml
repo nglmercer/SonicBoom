@@ -26,8 +26,10 @@ server = [
 ]
 # Server-side audio playback queue (requires ALSA on Linux).
 playback = ["dep:rodio"]
-# Desktop system tray (tao/tray-icon). Only relevant on macOS/Windows/Linux desktops.
-gui = ["server", "dep:tray-icon", "dep:tao", "dep:image", "dep:open"]
+# Desktop system tray. Linux uses ksni (pure-Rust StatusNotifierItem, no GTK);
+# macOS/Windows use tao/tray-icon (native backends, no GTK compiled in).
+# Only relevant on desktop systems.
+gui = ["server", "dep:ksni", "dep:tray-icon", "dep:tao", "dep:image", "dep:open"]
 # First-party TikTools process plugin. It contains only the reusable engine
 # and SDK adapter; it does not start the HTTP server, tray, or playback queue.
 tiktools-plugin = ["dep:tiktools-plugin-sdk"]
@@ -64,13 +66,18 @@ tower-sessions = { version = "0.14", features = ["memory-store"], optional = tru
 
 # ONNX inference (CoreML is macOS-only and opt-in via the `coreml` feature;
 # CUDA/ROCm are opt-in via the `cuda`/`rocm` features).
-# NOTE: `ort` is currently pinned to a release candidate (2.0.0-rc.11);
-# pin to a stable release once one is published.
-ort = { version = "2.0.0-rc.11", features = ["ndarray"] }
+# NOTE: `ort` has no stable 2.x release yet (latest is 2.0.0-rc.13 as of
+# 2026-09-16); pin to a stable release once one is published. Reviewed
+# 2026-09-16: rc.11 -> rc.13, no advisory on the RC series. Migration:
+# providers moved `execution_providers::*ExecutionProvider` to short
+# `ep::{CUDA, ROCm, CoreML}` names, `commit_from_file` takes `&mut`, and
+# `with_execution_providers` errors (builder-carrying, not Send/Sync) are
+# rendered via Display. Verified: CPU/cuda/rocm/coreml checks green.
+ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
 ndarray = "0.17"
 
 # Audio encoding/decoding
-opus = "0.3"
+opus = "0.4"
 ogg = "0.9"
 hound = "3.5"
 shine-rs = "0.1"
@@ -110,10 +117,21 @@ unicode-normalization = "0.1"
 time = "0.3"
 
 # Tray icon (Desktop GUI only — gated behind the `gui` feature)
-tray-icon = { version = "0.19", optional = true }
-tao = { version = "0.30", optional = true }
 image = { version = "0.25", optional = true }
 open = { version = "5.3", optional = true }
+
+# Linux tray: pure-Rust StatusNotifierItem (D-Bus only, no GTK system libs).
+# Deliberately NOT tao/tray-icon: their Linux backends pull the unmaintained
+# GTK3 bindings (glib 0.18, RUSTSEC-2024-0429) into every build.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"], optional = true }
+
+# macOS/Windows tray: tao/tray-icon with native backends. GTK/glib appear in
+# Cargo.lock via these crates' Linux-only backend deps, but they are compiled
+# into no artifact on any target (see .cargo/audit.toml for verification).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.19", optional = true }
+tao = { version = "0.30", optional = true }
 
 # Pinned to an immutable revision of the `remake` branch (retrieved 2026-09-16).
 # Update intentionally via `cargo update -p tiktools-plugin-sdk` and review the diff.

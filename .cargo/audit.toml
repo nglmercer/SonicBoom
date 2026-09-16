@@ -9,6 +9,7 @@
 # Each ignored advisory below documents: why it is present, whether the
 # affected code is compiled into our targets, whether it is reachable at
 # runtime, and the migration plan. Review this list on every dependency bump.
+# Last full review: 2026-09-16 (see "Review notes" at the bottom).
 #
 # Note on `cargo deny`: evaluated and deliberately not added. `cargo audit`
 # already gates advisories (including unmaintained/unsound); a second advisory
@@ -17,47 +18,78 @@
 # permissive; see `cargo tree -e license` on demand).
 [advisories]
 ignore = [
-    # --- build-only / transitive, no security impact on the server ---
-    # paste: unmaintained proc-macro helper, pulled transitively via
-    # `ort`/`tracing` macro stacks. Compiled at build time only; its output
-    # (identifier pasting) is not reachable at runtime. Migration: disappears
-    # when upstream `ort` moves off it; no maintained fork to switch to.
-    "RUSTSEC-2024-0436", # paste - unmaintained
-    # proc-macro-error: unmaintained, build-time only (diagnostic helpers for
-    # derive macros). Not linked into any binary. Migration: upstream crates
-    # migrating to `proc-macro-error-2` / `manyhow` will drop it.
-    "RUSTSEC-2024-0370", # proc-macro-error - unmaintained
-    # core2: unmaintained `no_std` polyfill, wasm-only transitive dep via
-    # reqwest's wasm target deps. Never compiled for our Linux/macOS/Windows
-    # server targets. Migration: bump reqwest when a release drops it.
-    "RUSTSEC-2026-0105", # core2 - unmaintained (wasm-only transitive via reqwest)
-    # --- `gui` feature only (GTK3 bindings, deprecated by gtk-rs) ---
-    # instant: unmaintained time shim used by tao/winit. Only compiled with
-    # `--features gui` (desktop tray); the headless/server/container builds
-    # never include it. Migration: upstream winit 0.30 rewrite; out of scope
-    # for the network server threat model.
-    "RUSTSEC-2024-0384", # instant - unmaintained (via tao/winit, gui only)
-    # glib: unsound `VariantStrIter` iterator. Only reachable via the `gui`
-    # feature's GTK stack; server builds do not compile glib. Migration:
-    # gtk-rs GTK4 bindings if/when the tray GUI is ported.
-    "RUSTSEC-2024-0429", # glib - unsound VariantStrIter (only via `gui`)
+    # --- build-time proc-macros, `gui` feature only ---
+    # paste: unmaintained proc-macro helper, pulled via
+    # image -> ravif -> rav1e (`gui` feature's tray-icon decoding only).
+    # A proc-macro: compiled for the build host, never linked into any
+    # binary, and only when `--features gui` is enabled. Server, headless,
+    # Docker, and TikTools builds never see it. Migration: disappears if
+    # `image` drops its AVIF/rav1e path or if the tray icon moves to a
+    # decoder without it; no maintained fork to switch to.
+    "RUSTSEC-2024-0436", # paste - unmaintained (gui-only proc-macro via image/rav1e)
+    # proc-macro-error: unmaintained, pulled via glib-macros/gtk3-macros
+    # (derive diagnostics for the GTK3 bindings below). Proc-macro only:
+    # never linked into any binary. Migration: disappears with the GTK3
+    # stack if the macOS/Windows tray ever moves off tao/tray-icon.
+    "RUSTSEC-2024-0370", # proc-macro-error - unmaintained (gui-only proc-macro)
+    # core2: unmaintained `no_std` polyfill, pulled via
+    # image -> ravif -> rav1e -> bitstream-io (`gui` feature only; the
+    # earlier "wasm transitive via reqwest" note was stale — reqwest no
+    # longer pulls it). Never compiled for server/headless/container
+    # targets. Migration: same as `paste` (tied to image's AVIF path).
+    "RUSTSEC-2026-0105", # core2 - unmaintained (gui-only via image/rav1e)
+    # --- `gui` feature, macOS/Windows targets only (never compiled on Linux) ---
+    # instant: unmaintained time shim used by tao/winit. Only in the graph
+    # via tao, which is now a non-Linux-only dependency of `--features gui`.
+    # The Linux GUI tray uses ksni (StatusNotifierItem, no tao/winit/GTK),
+    # so `instant` is compiled into no Linux artifact at all. Migration:
+    # upstream winit 0.30 rewrite; out of scope for the server threat model.
+    "RUSTSEC-2024-0384", # instant - unmaintained (via tao, non-Linux gui only)
+    # glib: unsound `VariantStrIter` iterator. Present in Cargo.lock ONLY via
+    # tao/tray-icon, which are now `cfg(not(target_os = "linux"))`
+    # dependencies of `--features gui`. Verified 2026-09-16 that glib is
+    # compiled into NO shipped artifact on ANY target:
+    #   cargo tree --features gui --target x86_64-unknown-linux-gnu -i glib
+    #     -> "nothing to print" (Linux GUI uses ksni/SNI, no GTK)
+    #   cargo tree --features gui --target x86_64-pc-windows-msvc -i glib
+    #     -> "nothing to print" (native backend, GTK is Linux-only there)
+    #   cargo tree --features gui --target aarch64-apple-darwin -i glib
+    #     -> "nothing to print" (native backend)
+    # `cargo audit` still flags it because it scans the target-union lockfile
+    # (see `--target all`), not per-target builds — that is the sole reason
+    # this exception remains. Re-verify with the commands above on every
+    # tao/tray-icon bump. Full removal requires tao/tray-icon to drop their
+    # Linux GTK backend (even newest 0.37/0.25 still use gtk 0.18) or a
+    # native macOS/Windows tray rewrite; the Linux SNI migration was the
+    # smallest maintainable step and is done.
+    "RUSTSEC-2024-0429", # glib - unsound VariantStrIter (lockfile-only via non-Linux gui)
     # gdkwayland-sys/gdk/atk/gdkx11-sys/gtk/atk-sys/gdk-sys/gtk3-macros/gtk-sys:
-    # unmaintained GTK3 sys bindings, `gui` feature only (see glib note).
-    "RUSTSEC-2024-0411", # gdkwayland-sys - unmaintained (gui only)
-    "RUSTSEC-2024-0412", # gdk - unmaintained (gui only)
-    "RUSTSEC-2024-0413", # atk - unmaintained (gui only)
-    "RUSTSEC-2024-0414", # gdkx11-sys - unmaintained (gui only)
-    "RUSTSEC-2024-0415", # gtk - unmaintained (gui only)
-    "RUSTSEC-2024-0416", # atk-sys - unmaintained (gui only)
-    "RUSTSEC-2024-0418", # gdk-sys - unmaintained (gui only)
-    "RUSTSEC-2024-0419", # gtk3-macros - unmaintained (gui only)
-    "RUSTSEC-2024-0420", # gtk-sys - unmaintained (gui only)
-    # --- real server dep, but no maintained replacement exists ---
-    # audiopus_sys: unmaintained FFI bindings, pulled by our `opus` audio
-    # encoder. It IS compiled into the server and reachable at runtime
-    # (Opus encoding path). The advisory is "unmaintained", not a memory
-    # safety bug; `opus` 0.3 has no newer release. Migration: watch for an
-    # `opus` 0.4 release or evaluate `opusic-sys`/`audiopus` alternatives;
-    # re-audit on every `cargo update -p opus`.
-    "RUSTSEC-2026-0150", # audiopus_sys - unmaintained (pulled by `opus`)
+    # unmaintained GTK3 sys bindings. Same situation as glib above:
+    # lockfile-only via non-Linux `--features gui`, compiled into no
+    # artifact on any target (same verification commands with `-i gtk`).
+    "RUSTSEC-2024-0411", # gdkwayland-sys - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0412", # gdk - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0413", # atk - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0414", # gdkx11-sys - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0415", # gtk - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0416", # atk-sys - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0418", # gdk-sys - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0419", # gtk3-macros - unmaintained (lockfile-only via non-Linux gui)
+    "RUSTSEC-2024-0420", # gtk-sys - unmaintained (lockfile-only via non-Linux gui)
 ]
+
+# Review notes (2026-09-16):
+# - REMOVED RUSTSEC-2026-0150 (audiopus_sys, unmaintained): `opus` upgraded
+#   0.3.1 -> 0.4.0, which uses maintained `opusic-sys`. API-compatible;
+#   guarded by new encoder round-trip tests in src/tts/audio.rs.
+# - `ort` reviewed and bumped 2.0.0-rc.11 -> 2.0.0-rc.13 (no stable 2.x
+#   exists; no advisory on the RC series). Migration: `ep::{CUDA, ROCm,
+#   CoreML}` renames, `&mut` session builder, Display-rendered provider
+#   errors. CPU/cuda/rocm/coreml checks all green.
+# - Linux `--features gui` migrated from tao/tray-icon to ksni 0.3.6
+#   (StatusNotifierItem): the Linux GUI binary no longer compiles any GTK
+#   code. tao/tray-icon remain ONLY for macOS/Windows trays, where they
+#   never compiled GTK either (verified per-target with `cargo tree -i`).
+# - paste/core2 pull chains corrected: both come via image->ravif->rav1e
+#   (gui-only), not via ort/tracing/reqwest as previously documented.
+# - ksni 0.3.6 subtree (zbus etc.) audited clean, no new exceptions needed.

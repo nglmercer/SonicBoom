@@ -1,12 +1,12 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::tts::queue::QueueStatus;
+use crate::tts::queue::{AudioManagerError, QueueStatus};
 use crate::{AppState, auth::AuthenticatedToken};
 
 /// Request to add an audio file to the queue
@@ -56,6 +56,34 @@ pub fn validate_queue_id(id: &str) -> Result<(), &'static str> {
         return Err("queue id must not contain control characters");
     }
     Ok(())
+}
+
+/// Validate a caller-supplied volume: `0.0..=1.0`, finite. Out-of-range or
+/// non-finite values are caller errors (`400`), never silently clamped —
+/// clamping stays only as a defensive measure inside the sink code.
+pub fn validate_volume(volume: f32) -> Result<f32, &'static str> {
+    if !volume.is_finite() {
+        return Err("volume must be a finite number");
+    }
+    if !(0.0..=1.0).contains(&volume) {
+        return Err("volume must be between 0.0 and 1.0");
+    }
+    Ok(volume)
+}
+
+/// Map a playback-subsystem failure to a stable API response: a dead audio
+/// thread is `503`, a full queue is `429`.
+fn audio_error_response(error: AudioManagerError) -> (StatusCode, Json<QueueResponse>) {
+    match error {
+        AudioManagerError::QueueFull => failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Playback queue is full. Try again later.",
+        ),
+        AudioManagerError::Unavailable => failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Audio playback system unavailable.",
+        ),
+    }
 }
 
 const ALLOWED_AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "opus"];
@@ -153,7 +181,9 @@ pub async fn queue_audio(
     };
 
     if req.play_now.unwrap_or(false) {
-        audio_manager.play_now(id.clone(), path).await;
+        if let Err(error) = audio_manager.play_now(id.clone(), path).await {
+            return audio_error_response(error);
+        }
         (
             StatusCode::OK,
             Json(QueueResponse {
@@ -163,7 +193,9 @@ pub async fn queue_audio(
             }),
         )
     } else {
-        audio_manager.add_to_queue(id.clone(), path).await;
+        if let Err(error) = audio_manager.add_to_queue(id.clone(), path).await {
+            return audio_error_response(error);
+        }
 
         (
             StatusCode::OK,
@@ -191,9 +223,14 @@ pub async fn play_next(
         }
     };
 
-    audio_manager.play_next().await;
+    if let Err(error) = audio_manager.play_next().await {
+        return audio_error_response(error);
+    }
 
-    let status = audio_manager.status().await;
+    let status = match audio_manager.status().await {
+        Ok(status) => status,
+        Err(error) => return audio_error_response(error),
+    };
     (
         StatusCode::OK,
         Json(QueueResponse {
@@ -223,7 +260,9 @@ pub async fn pause_audio(
         }
     };
 
-    audio_manager.pause().await;
+    if let Err(error) = audio_manager.pause().await {
+        return audio_error_response(error);
+    }
     (
         StatusCode::OK,
         Json(QueueResponse {
@@ -249,7 +288,9 @@ pub async fn resume_audio(
         }
     };
 
-    audio_manager.resume().await;
+    if let Err(error) = audio_manager.resume().await {
+        return audio_error_response(error);
+    }
     (
         StatusCode::OK,
         Json(QueueResponse {
@@ -275,7 +316,9 @@ pub async fn stop_audio(
         }
     };
 
-    audio_manager.stop().await;
+    if let Err(error) = audio_manager.stop().await {
+        return audio_error_response(error);
+    }
     (
         StatusCode::OK,
         Json(QueueResponse {
@@ -302,8 +345,13 @@ pub async fn set_volume(
         }
     };
 
-    let volume = req.volume.unwrap_or(1.0).clamp(0.0, 1.0);
-    audio_manager.set_volume(volume).await;
+    let volume = match validate_volume(req.volume.unwrap_or(1.0)) {
+        Ok(volume) => volume,
+        Err(message) => return failure(StatusCode::BAD_REQUEST, message),
+    };
+    if let Err(error) = audio_manager.set_volume(volume).await {
+        return audio_error_response(error);
+    }
     (
         StatusCode::OK,
         Json(QueueResponse {
@@ -318,7 +366,7 @@ pub async fn set_volume(
 pub async fn get_queue_status(
     _token: AuthenticatedToken,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> Response {
     let audio_manager = match &*state.audio_manager {
         Some(manager) => manager,
         None => {
@@ -331,11 +379,23 @@ pub async fn get_queue_status(
                     is_paused: false,
                     volume: 1.0,
                 }),
-            );
+            )
+                .into_response();
         }
     };
 
-    (StatusCode::OK, Json(audio_manager.status().await))
+    match audio_manager.status().await {
+        Ok(status) => (StatusCode::OK, Json(status)).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(QueueResponse {
+                success: false,
+                message: "Audio playback system unavailable.".to_string(),
+                id: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -470,5 +530,34 @@ mod tests {
         assert!(validate_queue_id(&"x".repeat(129)).is_err());
         assert!(validate_queue_id("a\nb").is_err());
         assert!(validate_queue_id("a\0b").is_err());
+    }
+
+    #[test]
+    fn volume_accepts_only_finite_unit_range() {
+        assert_eq!(validate_volume(0.0), Ok(0.0));
+        assert_eq!(validate_volume(1.0), Ok(1.0));
+        assert_eq!(validate_volume(0.5), Ok(0.5));
+        for bad in [
+            -0.1,
+            1.1,
+            -1.0,
+            100.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert!(
+                validate_volume(bad).is_err(),
+                "volume {bad} must be rejected, not clamped"
+            );
+        }
+    }
+
+    #[test]
+    fn playback_failures_map_to_stable_statuses() {
+        let (status, _) = audio_error_response(AudioManagerError::QueueFull);
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let (status, _) = audio_error_response(AudioManagerError::Unavailable);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

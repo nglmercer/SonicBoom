@@ -123,7 +123,7 @@ pub fn admin_page(tokens: &[Token], csrf_token: &str, new_token: Option<&str>) -
   <form method="post" action="/admin/tokens">
     <input type="hidden" name="csrf_token" value="{}">
     <label>Expires: <input type="datetime-local" name="expires_at"></label>
-    <small>(leave blank for no expiry)</small>
+    <small>(leave blank for no expiry; interpreted as UTC)</small>
     <br><br>
     <button type="submit">Generate Token</button>
   </form>
@@ -134,6 +134,30 @@ pub fn admin_page(tokens: &[Token], csrf_token: &str, new_token: Option<&str>) -
         new_token_html,
         rows,
         html_escape(csrf_token)
+    )
+}
+
+/// Small error page for rejected admin form submissions (e.g. a
+/// malformed token expiry). Carries no inline script or style.
+pub fn error_page(message: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SonicBoom Admin - Error</title>
+<link rel="stylesheet" href="/static/admin.css">
+</head>
+<body class="login">
+<div class="box">
+  <h1>Request Rejected</h1>
+  <p class="error">{}</p>
+  <p><a href="/admin">Back to admin panel</a></p>
+</div>
+</body>
+</html>"#,
+        html_escape(message)
     )
 }
 
@@ -175,11 +199,20 @@ mod tests {
     }
 
     #[test]
+    fn error_page_escapes_message_and_links_back() {
+        let html = error_page("<script>alert(1)</script>");
+        assert!(!html.contains("<script>"), "message became markup: {html}");
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains(r#"href="/admin""#));
+    }
+
+    #[test]
     fn admin_pages_have_no_inline_script_or_style() {
         let token = Token::new(hash_token_value("x"), None);
         for html in [
             login_page(None),
             admin_page(std::slice::from_ref(&token), "csrf", None),
+            error_page("bad input"),
         ] {
             assert!(!html.contains("<script"), "inline script found");
             assert!(!html.contains("<style"), "inline style found");

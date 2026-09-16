@@ -7,7 +7,7 @@
   - HTTP 서버와 병렬적으로 ONNX 모델 다운로드 및 로드 진행한다
 - /api/tts 엔드포인트로 HTTP 요청을 받으면 입력된 텍스트를 Supertonic 3 모델로 음성으로 변환하여 OPUS 압축하여 반환
   - HTTP 요청을 할 때는 Authorization 헤더로 Bearer 토큰 입력이 필요
-  - 입력값은 `text/plain` 출력값은 `audio/opus`
+  - 입력값은 `text/plain` 출력값은 `audio/ogg; codecs=opus` (Opus 기본값; `wav`/`mp3`/`flac`도 지원)
   - 오류는 다음과 같은 형태로 HTTP 상태 코드 반환
     - 변환 성공하여 OPUS 스트림 반환하는 경우: `200`
     - Bearer 토큰을 못 받았거나 잘못된 토큰인 경우: `401`

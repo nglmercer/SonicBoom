@@ -111,13 +111,14 @@ impl SonicBoomEngine {
             .map(|p| p.to_string_lossy().into_owned());
         // Same trust policy as the HTTP server: a custom revision requires
         // an explicit trusted manifest for that exact revision.
-        let (revision, expected_hashes) =
+        let (revision, expected_trust) =
             download::resolve_trust(&revision, custom_manifest.as_deref())?;
         let paths = download::download_models_with_options(
             &config.model_dir,
             config.hf_token.as_deref(),
             &revision,
-            &expected_hashes,
+            &expected_trust,
+            &download::DownloadLimits::default(),
             on_progress,
         )
         .await?;

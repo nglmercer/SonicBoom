@@ -51,10 +51,13 @@ Navigate to `/admin` to see all API tokens:
 #### Create Token
 
 1. Go to `/admin`
-2. Pick an optional expiry date
+2. Pick an optional expiry date (interpreted as UTC; blank means no expiry)
 3. Click "Generate Token"
 4. Copy the generated token immediately (shown only once)
 5. Share with API users over a secure channel
+
+A malformed or past expiry is rejected with `400` — it never silently
+mints a perpetual token.
 
 Tokens are stored as SHA-256 hashes; the raw value cannot be recovered later.
 
@@ -106,7 +109,9 @@ The admin panel includes brute-force protection with automatic expiry:
 - **Lockout:** 15 minutes, then automatic recovery
 - IP-based tracking (socket peer by default; forwarded headers are only
   honored from explicitly configured trusted proxies — see
-  `TRUST_PROXY`/`TRUSTED_PROXIES` in [config.md](config.md))
+  `TRUST_PROXY`/`TRUSTED_PROXIES` in [config.md](config.md)).
+  Proxy chains are parsed from the trusted (right) side, so spoofed
+  leftmost `X-Forwarded-For` entries cannot rotate lockout identity.
 - Bounded tracker memory (oldest entries evicted under pressure)
 
 After too many failed attempts, you'll see:

@@ -9,11 +9,49 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use super::gate::RunBoundedError;
 use crate::{
     auth::AuthenticatedToken,
     error::AppError,
     tts::{ModelStatus, audio, inference},
 };
+
+/// Run model inference with the admission permit owned by the blocking
+/// task itself, so an HTTP timeout/cancellation can never release the
+/// concurrency slot while inference still runs (see
+/// [`crate::api::gate::InferenceGate::run_bounded`]).
+pub(super) async fn synthesize_bounded(
+    state: &crate::AppState,
+    model_handle: std::sync::Arc<crate::tts::model::ModelHandle>,
+    text: String,
+    lang: String,
+    voice_name: String,
+) -> Result<Vec<f32>, AppError> {
+    let inference_steps = state.config.inference_steps;
+    let max_chunk_chars = state.config.max_chunk_chars;
+    state
+        .inference_gate
+        .run_bounded(move || {
+            inference::synthesize(
+                &model_handle,
+                &text,
+                &lang,
+                &voice_name,
+                inference_steps,
+                max_chunk_chars,
+            )
+        })
+        .await
+        .map_err(|e| match e {
+            RunBoundedError::Saturated => AppError::TooManyRequests(
+                "Server is busy. Too many pending inference requests.".to_string(),
+            ),
+            RunBoundedError::JoinFailed(detail) => {
+                AppError::internal(format!("inference task failed: {detail}"))
+            }
+        })?
+        .map_err(|e| AppError::internal(e.to_string()))
+}
 
 #[derive(Deserialize)]
 pub struct TtsQuery {
@@ -139,36 +177,18 @@ pub async fn post_tts(
             .to_string(),
     };
     let sample_rate = model_handle.sample_rate();
-    let inference_steps = state.config.inference_steps;
-    let max_chunk_chars = state.config.max_chunk_chars;
 
-    // Determine output format
+    // Determine output format: omitted means Opus, but an explicit
+    // unknown value is a client error, never a silent default.
     let format = query
         .format
         .as_deref()
         .map(audio::AudioFormat::parse)
+        .transpose()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
         .unwrap_or(audio::AudioFormat::Opus);
 
-    // Bounded admission control before spawning blocking work.
-    let _permit = state.inference_gate.admit().await.ok_or_else(|| {
-        AppError::TooManyRequests(
-            "Server is busy. Too many pending inference requests.".to_string(),
-        )
-    })?;
-
-    let samples = tokio::task::spawn_blocking(move || {
-        inference::synthesize(
-            &model_handle,
-            &text,
-            &lang,
-            &voice_name,
-            inference_steps,
-            max_chunk_chars,
-        )
-    })
-    .await
-    .map_err(|e| AppError::internal(format!("inference task failed: {e}")))?
-    .map_err(|e| AppError::internal(e.to_string()))?;
+    let samples = synthesize_bounded(&state, model_handle, text, lang, voice_name).await?;
 
     let audio_bytes = audio::encode_audio(&samples, sample_rate, format)
         .map_err(|e| AppError::internal(e.to_string()))?;
@@ -231,58 +251,67 @@ pub async fn post_tts_and_play(
     };
 
     let sample_rate = model_handle.sample_rate();
-    let inference_steps = state.config.inference_steps;
-    let max_chunk_chars = state.config.max_chunk_chars;
     let play_now = query.play_now.unwrap_or(false);
 
-    let _permit = state.inference_gate.admit().await.ok_or_else(|| {
-        AppError::TooManyRequests(
-            "Server is busy. Too many pending inference requests.".to_string(),
-        )
-    })?;
-
     // Synthesis to WAV for local playback (Rodio likes WAV/Decoder compatibility)
-    let samples = tokio::task::spawn_blocking(move || {
-        inference::synthesize(
-            &model_handle,
-            &text,
-            &lang,
-            &voice_name,
-            inference_steps,
-            max_chunk_chars,
-        )
-    })
-    .await
-    .map_err(|e| AppError::internal(format!("inference task failed: {e}")))?
-    .map_err(|e| AppError::internal(e.to_string()))?;
+    let samples = synthesize_bounded(&state, model_handle, text, lang, voice_name).await?;
 
     // We use WAV for internal queue to ensure maximum compatibility with rodio
     let audio_bytes = audio::encode_audio(&samples, sample_rate, audio::AudioFormat::Wav)
         .map_err(|e| AppError::internal(e.to_string()))?;
 
-    // Ensure temp directory exists
-    let temp_dir = std::path::PathBuf::from(&state.config.temp_audio_dir);
-    if !temp_dir.exists() {
-        tokio::fs::create_dir_all(&temp_dir)
-            .await
-            .map_err(|e| AppError::internal(e.to_string()))?;
-    }
+    // Ensure the temp directory exists with restrictive permissions.
+    let temp_dir =
+        crate::tts::queue::ensure_temp_dir(std::path::Path::new(&state.config.temp_audio_dir))
+            .map_err(|e| AppError::internal(format!("temp audio dir unavailable: {e}")))?;
 
-    // Save to temp file
+    // Save to a temp file readable only by the server user (synthesized
+    // speech may be private). The filename matches the startup-sweep
+    // pattern (`<uuid>.wav`) so leftovers are reaped on restart.
     let id = uuid::Uuid::new_v4().to_string();
     let filename = format!("{id}.wav");
     let path = temp_dir.join(&filename);
 
-    tokio::fs::write(&path, audio_bytes)
+    crate::tts::queue::write_temp_wav(&path, &audio_bytes)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|e| AppError::internal(format!("temp audio write failed: {e}")))?;
 
-    // Register temp file for cleanup after playback, then add to queue
-    audio_manager.register_temp(path.clone()).await;
-    if play_now {
-        audio_manager.play_now(id.clone(), path).await;
+    // Enqueue first; register for cleanup only after the queue accepted
+    // the item, so a rejection cannot orphan the file. Every failure path
+    // below deletes the newly generated file.
+    let queued = if play_now {
+        audio_manager
+            .play_now(id.clone(), path.clone())
+            .await
+            .map_err(|_| {
+                AppError::ServiceUnavailable("Audio playback system unavailable.".to_string())
+            })
     } else {
-        audio_manager.add_to_queue(id.clone(), path).await;
+        audio_manager
+            .add_to_queue(id.clone(), path.clone())
+            .await
+            .map_err(|e| match e {
+                crate::tts::queue::AudioManagerError::QueueFull => AppError::TooManyRequests(
+                    "Playback queue is full. Try again later.".to_string(),
+                ),
+                crate::tts::queue::AudioManagerError::Unavailable => {
+                    AppError::ServiceUnavailable("Audio playback system unavailable.".to_string())
+                }
+            })
+    };
+    if let Err(error) = queued {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(error);
+    }
+    if let Err(crate::tts::queue::AudioManagerError::Unavailable) =
+        audio_manager.register_temp(path.clone()).await
+    {
+        // The audio thread died between enqueue and registration; remove
+        // the file rather than leaving it permanently unreachable.
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(AppError::ServiceUnavailable(
+            "Audio playback system unavailable.".to_string(),
+        ));
     }
 
     Ok((

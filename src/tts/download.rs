@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 const MODEL_REPO: &str = "Supertone/supertonic-3";
 
@@ -10,9 +11,9 @@ const MODEL_REPO: &str = "Supertone/supertonic-3";
 /// revision additionally requires an explicit trusted manifest.
 pub const DEFAULT_MODEL_REVISION: &str = "3cadd1ee6394adea1bd021217a0e650ede09a323";
 
-/// Built-in trust root: expected SHA-256 digests for every model file at
-/// [`DEFAULT_MODEL_REVISION`], compiled into the binary so the default
-/// installation is verified out of the box.
+/// Built-in trust root: expected SHA-256 digests (and exact byte sizes) for
+/// every model file at [`DEFAULT_MODEL_REVISION`], compiled into the binary
+/// so the default installation is verified out of the box.
 const TRUSTED_MODEL_HASHES_JSON: &str = include_str!("../../models.sha256.json");
 
 /// Authoritative list of model files. Every entry must have a trusted digest
@@ -50,6 +51,47 @@ pub struct ModelPaths {
 /// Expected SHA-256 digests keyed by repository-relative filename.
 pub type ExpectedHashes = HashMap<String, String>;
 
+/// Expected exact byte sizes keyed by repository-relative filename. Sizes
+/// bound downloads *before* authenticity verification completes; SHA-256
+/// remains authoritative for authenticity.
+pub type ExpectedSizes = HashMap<String, u64>;
+
+/// Trusted download policy for one revision: hashes plus optional exact
+/// sizes. The built-in manifest always carries sizes; operator manifests
+/// should too (legacy hash-only manifests are accepted but cannot bound
+/// downloads before hashing).
+pub struct ExpectedTrust {
+    pub hashes: ExpectedHashes,
+    pub sizes: Option<ExpectedSizes>,
+}
+
+/// Network resource limits for model downloads.
+#[derive(Debug, Clone)]
+pub struct DownloadLimits {
+    /// TCP/TLS connect timeout per file.
+    pub connect_timeout: Duration,
+    /// Total timeout per file, including the whole body transfer.
+    pub timeout: Duration,
+}
+
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(1800),
+        }
+    }
+}
+
+impl DownloadLimits {
+    pub fn new(connect_timeout_secs: u64, timeout_secs: u64) -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(connect_timeout_secs.max(1)),
+            timeout: Duration::from_secs(timeout_secs.max(1)),
+        }
+    }
+}
+
 /// Immutable-revision check: exactly 40 hexadecimal characters (a full Git
 /// commit SHA). Rejects `main`, tags, short SHAs, and anything else mutable.
 pub fn is_valid_commit_sha(value: &str) -> bool {
@@ -61,6 +103,45 @@ fn validate_sha256(name: &str, digest: &str) -> Result<()> {
         anyhow::bail!("invalid sha256 for '{name}': must be 64 hex chars");
     }
     Ok(())
+}
+
+/// One manifest value: either a bare SHA-256 hex string (legacy) or an
+/// object carrying both the digest and the exact expected byte size.
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum ManifestEntry {
+    HashOnly(String),
+    WithSize { sha256: String, size: u64 },
+}
+
+/// Split a parsed manifest into hashes plus optional sizes. Mixing the two
+/// value shapes in one file is rejected: manifests must be uniformly sized
+/// or uniformly legacy so enforcement is never silently partial.
+fn split_manifest(
+    raw: &HashMap<String, ManifestEntry>,
+) -> Result<(ExpectedHashes, Option<ExpectedSizes>)> {
+    let mut hashes = ExpectedHashes::with_capacity(raw.len());
+    let mut sizes = ExpectedSizes::new();
+    let mut sized_count = 0usize;
+    for (name, entry) in raw {
+        match entry {
+            ManifestEntry::HashOnly(digest) => {
+                hashes.insert(name.clone(), digest.clone());
+            }
+            ManifestEntry::WithSize { sha256, size } => {
+                hashes.insert(name.clone(), sha256.clone());
+                sizes.insert(name.clone(), *size);
+                sized_count += 1;
+            }
+        }
+    }
+    if sized_count > 0 && sized_count != raw.len() {
+        anyhow::bail!(
+            "model manifest mixes sized and hash-only entries; use one shape consistently"
+        );
+    }
+    let sizes = if sized_count == 0 { None } else { Some(sizes) };
+    Ok((hashes, sizes))
 }
 
 /// Validate that a manifest is complete and well-formed: every
@@ -81,18 +162,70 @@ pub fn validate_manifest(hashes: &ExpectedHashes) -> Result<()> {
     Ok(())
 }
 
+/// Validate an expected-size table: complete over [`MODEL_FILES`], every
+/// size positive, no unexpected keys.
+pub fn validate_sizes(sizes: &ExpectedSizes) -> Result<()> {
+    for filename in MODEL_FILES {
+        let size = sizes
+            .get(*filename)
+            .ok_or_else(|| anyhow!("missing trusted size for {filename}"))?;
+        if *size == 0 {
+            anyhow::bail!("trusted size for '{filename}' must be positive");
+        }
+    }
+    for key in sizes.keys() {
+        if !MODEL_FILES.contains(&key.as_str()) {
+            anyhow::bail!("unexpected model size entry: {key}");
+        }
+    }
+    Ok(())
+}
+
+fn parse_manifest_json(data: &str) -> Result<(ExpectedHashes, Option<ExpectedSizes>)> {
+    let raw: HashMap<String, ManifestEntry> =
+        serde_json::from_str(data).with_context(|| "model manifest is not valid JSON")?;
+    let (hashes, sizes) = split_manifest(&raw)?;
+    validate_manifest(&hashes).with_context(|| "model manifest is incomplete or invalid")?;
+    if let Some(sizes) = &sizes {
+        validate_sizes(sizes).with_context(|| "model size table is incomplete or invalid")?;
+    }
+    Ok((hashes, sizes))
+}
+
 /// Parse and validate the compiled-in trusted manifest.
 pub fn builtin_trusted_hashes() -> Result<ExpectedHashes> {
-    let hashes: ExpectedHashes = serde_json::from_str(TRUSTED_MODEL_HASHES_JSON)
-        .context("built-in model hash manifest is not valid JSON")?;
-    validate_manifest(&hashes).context("built-in model hash manifest is invalid")?;
+    let hashes: ExpectedHashes = builtin_trust()?.hashes;
     Ok(hashes)
 }
 
+/// Parse and validate the compiled-in trusted size table.
+pub fn builtin_trusted_sizes() -> Result<ExpectedSizes> {
+    builtin_trust()?
+        .sizes
+        .ok_or_else(|| anyhow!("built-in model manifest is missing its size table"))
+}
+
+fn builtin_trust() -> Result<ExpectedTrust> {
+    let (hashes, sizes) = parse_manifest_json(TRUSTED_MODEL_HASHES_JSON)
+        .context("built-in model hash manifest is invalid")?;
+    Ok(ExpectedTrust { hashes, sizes })
+}
+
 /// Load an operator-provided expected-hashes manifest: JSON object mapping
-/// `"<repo-relative path>" -> "<sha256 hex>"`. The manifest must be complete
+/// `"<repo-relative path>"` to either `"<sha256 hex>"` or
+/// `{"sha256": "<hex>", "size": <bytes>}`. The manifest must be complete
 /// (see [`validate_manifest`]); partial manifests fail closed.
 pub fn load_expected_hashes(path: &str) -> Result<ExpectedHashes> {
+    Ok(load_expected_trust(path)?.hashes)
+}
+
+/// Load an operator-provided size table, if the manifest carries one.
+/// Returns `None` for legacy hash-only manifests.
+pub fn load_expected_sizes(path: &str) -> Result<Option<ExpectedSizes>> {
+    Ok(load_expected_trust(path)?.sizes)
+}
+
+fn load_expected_trust(path: &str) -> Result<ExpectedTrust> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("cannot read model hashes file '{path}'"))?;
     if !metadata.is_file() {
@@ -100,36 +233,36 @@ pub fn load_expected_hashes(path: &str) -> Result<ExpectedHashes> {
     }
     let data = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read model hashes file '{path}'"))?;
-    let hashes: ExpectedHashes =
-        serde_json::from_str(&data).with_context(|| "model hashes file is not valid JSON")?;
-    validate_manifest(&hashes).with_context(|| "model hashes file is incomplete or invalid")?;
-    Ok(hashes)
+    let (hashes, sizes) =
+        parse_manifest_json(&data).with_context(|| "model hashes file is incomplete or invalid")?;
+    Ok(ExpectedTrust { hashes, sizes })
 }
 
-/// Resolve the (revision, trusted hashes) pair under one policy shared by the
+/// Resolve the (revision, trusted policy) pair under one policy shared by the
 /// HTTP server and the reusable engine:
 ///
-/// - default revision + no custom manifest → built-in trusted manifest;
+/// - default revision + no custom manifest → built-in trusted manifest
+///   (hashes and sizes);
 /// - any revision + custom manifest → the validated custom manifest;
 /// - custom revision + no custom manifest → hard error (never pair a custom
 ///   revision with another revision's hashes).
 pub fn resolve_trust(
     revision: &str,
     custom_manifest_path: Option<&str>,
-) -> Result<(String, ExpectedHashes)> {
+) -> Result<(String, ExpectedTrust)> {
     if !is_valid_commit_sha(revision) {
         anyhow::bail!("MODEL_REVISION must be a 40-character commit SHA, got '{revision}'");
     }
     if let Some(path) = custom_manifest_path {
-        let hashes = load_expected_hashes(path)?;
-        return Ok((revision.to_string(), hashes));
+        let trust = load_expected_trust(path)?;
+        return Ok((revision.to_string(), trust));
     }
     if revision != DEFAULT_MODEL_REVISION {
         anyhow::bail!(
             "custom MODEL_REVISION requires MODEL_SHA256_JSON_PATH with trusted hashes for that exact revision"
         );
     }
-    Ok((revision.to_string(), builtin_trusted_hashes()?))
+    Ok((revision.to_string(), builtin_trust()?))
 }
 
 pub fn sha256_of_file(path: &Path) -> Result<String> {
@@ -139,22 +272,28 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Verify a cached file against its previously trusted digest. There is no
+/// Verify a cached file against its previously trusted policy. There is no
 /// trust-on-first-use: without a matching trusted digest the file is
-/// rejected (the caller deletes and redownloads it).
-fn verify_cached_file(
-    filename: &str,
-    local_path: &Path,
-    expected: &ExpectedHashes,
-) -> Result<bool> {
-    if !local_path.is_file()
-        || !std::fs::metadata(local_path)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
+/// rejected (the caller deletes and redownloads it). When a trusted size is
+/// known it is checked first so obviously wrong files are rejected without
+/// wasting CPU on a hash.
+fn verify_cached_file(filename: &str, local_path: &Path, expected: &ExpectedTrust) -> Result<bool> {
+    let metadata = match std::fs::metadata(local_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => metadata,
+        _ => return Ok(false),
+    };
+    if let Some(sizes) = &expected.sizes
+        && let Some(want_size) = sizes.get(filename)
+        && metadata.len() != *want_size
     {
+        tracing::warn!(
+            "size mismatch for cached {filename}: got {} bytes, want {want_size}",
+            metadata.len()
+        );
         return Ok(false);
     }
     let want = expected
+        .hashes
         .get(filename)
         .ok_or_else(|| anyhow!("missing trusted digest for {filename}"))?;
     let actual = sha256_of_file(local_path)?;
@@ -175,21 +314,42 @@ fn constant_time_eq_str(a: &str, b: &str) -> bool {
     }
 }
 
+/// Download one file with independent resource controls, then verify size
+/// and SHA-256 *before* renaming into the cache:
+///
+/// - `Content-Length`, when present, must equal the trusted size;
+/// - the stream aborts past the trusted size and must match it exactly;
+/// - the temp file's SHA-256 must match the trusted digest;
+/// - only then is the temp file atomically renamed to `dest`.
+///
+/// Neither errors nor logs ever include the bearer token: failures report
+/// the URL and sizes only.
 async fn download_file(
     client: &reqwest::Client,
     url: &str,
     dest: &std::path::Path,
     hf_token: Option<&str>,
+    expected_hash: &str,
+    expected_size: Option<u64>,
 ) -> Result<()> {
     let mut req = client.get(url);
     if let Some(token) = hf_token {
         req = req.bearer_auth(token);
     }
 
-    let resp = req.send().await?;
+    let resp = req.send().await.map_err(|e| {
+        // reqwest errors echo the URL; the Authorization header is never
+        // part of the message.
+        anyhow!("request failed for {url}: {e}")
+    })?;
     let status = resp.status();
     if !status.is_success() {
         anyhow::bail!("HTTP {status} for {url}");
+    }
+    if let (Some(want), Some(len)) = (expected_size, resp.content_length())
+        && len != want
+    {
+        anyhow::bail!("content-length {len} does not match trusted size {want} for {url}");
     }
 
     if let Some(parent) = dest.parent() {
@@ -200,13 +360,38 @@ async fn download_file(
     let result = async {
         let mut file = tokio::fs::File::create(&temporary).await?;
         let mut stream = resp.bytes_stream();
+        let mut received: u64 = 0;
         use futures_util::StreamExt;
         use tokio::io::AsyncWriteExt;
         while let Some(chunk) = stream.next().await {
-            file.write_all(&chunk?).await?;
+            let chunk = chunk?;
+            received += chunk.len() as u64;
+            if let Some(want) = expected_size
+                && received > want
+            {
+                anyhow::bail!(
+                    "download exceeded trusted size {want} for {url} (aborted at {received} bytes)"
+                );
+            }
+            file.write_all(&chunk).await?;
+        }
+        if let Some(want) = expected_size
+            && received != want
+        {
+            anyhow::bail!("download size {received} does not match trusted size {want} for {url}");
         }
         file.flush().await?;
         file.sync_all().await?;
+        drop(file);
+        // Verify authenticity before the file may appear at its final path.
+        let digest = tokio::task::spawn_blocking({
+            let temporary = temporary.clone();
+            move || sha256_of_file(&temporary)
+        })
+        .await??;
+        if !constant_time_eq_str(&digest, expected_hash) {
+            anyhow::bail!("hash mismatch for downloaded {url}");
+        }
         tokio::fs::rename(&temporary, dest).await?;
         Ok::<(), anyhow::Error>(())
     }
@@ -220,14 +405,15 @@ async fn download_file(
 /// Download (or reuse cached) model files pinned to `revision`.
 ///
 /// Every file — cached or freshly downloaded — is accepted only after its
-/// SHA-256 matches the previously trusted `expected_hashes`. Mismatches
-/// trigger deletion + redownload; a persistent mismatch fails instead of
-/// loading an unverified model.
+/// SHA-256 matches the previously trusted `expected.hashes`, within
+/// `limits`. Mismatches trigger deletion + redownload; a persistent
+/// mismatch fails instead of loading an unverified model.
 pub async fn download_models_with_options<F>(
     cache_dir: &Path,
     hf_token: Option<&str>,
     revision: &str,
-    expected_hashes: &ExpectedHashes,
+    expected: &ExpectedTrust,
+    limits: &DownloadLimits,
     on_progress: F,
 ) -> Result<ModelPaths>
 where
@@ -236,14 +422,20 @@ where
     if !is_valid_commit_sha(revision) {
         anyhow::bail!("model revision must be a 40-character commit SHA");
     }
-    validate_manifest(expected_hashes)?;
+    validate_manifest(&expected.hashes)?;
+    if let Some(sizes) = &expected.sizes {
+        validate_sizes(sizes)?;
+    }
     std::fs::create_dir_all(cache_dir)?;
     let cache_path = cache_dir
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap().join(cache_dir));
 
+    // Explicit timeouts: startup must never hang indefinitely on a network.
     let client = reqwest::Client::builder()
         .user_agent("SonicBoom/0.1")
+        .connect_timeout(limits.connect_timeout)
+        .timeout(limits.timeout)
         .build()?;
 
     let total = MODEL_FILES.len();
@@ -255,7 +447,7 @@ where
         let local_path = cache_path.join(filename.replace('/', std::path::MAIN_SEPARATOR_STR));
 
         // Reuse only files verified against the trusted manifest.
-        match verify_cached_file(filename, &local_path, expected_hashes) {
+        match verify_cached_file(filename, &local_path, expected) {
             Ok(true) => {
                 tracing::info!("Already cached (verified): {filename}");
                 paths.insert(filename.to_string(), local_path);
@@ -272,29 +464,26 @@ where
 
         let url = format!("https://huggingface.co/{MODEL_REPO}/resolve/{revision}/{filename}");
         tracing::info!("Downloading {filename} (revision {revision})...");
+        let want_hash = expected
+            .hashes
+            .get(filename)
+            .ok_or_else(|| anyhow!("missing trusted digest for {filename}"))?
+            .clone();
+        let want_size = expected
+            .sizes
+            .as_ref()
+            .and_then(|s| s.get(filename).copied());
 
         const MAX_RETRIES: u32 = 5;
         let mut last_err = None;
         let mut success = false;
         for attempt in 0..MAX_RETRIES {
-            match download_file(&client, &url, &local_path, hf_token).await {
+            // `download_file` verifies size and hash before rename, so any
+            // success here is an authenticated file at its final path.
+            match download_file(&client, &url, &local_path, hf_token, &want_hash, want_size).await {
                 Ok(()) => {
-                    // Verify what we just wrote before accepting it.
-                    let digest = sha256_of_file(&local_path)?;
-                    let want = expected_hashes
-                        .get(filename)
-                        .ok_or_else(|| anyhow!("missing trusted digest for {filename}"))?;
-                    if !constant_time_eq_str(&digest, want) {
-                        tracing::warn!(
-                            "Downloaded {filename} failed hash verification (attempt {})",
-                            attempt + 1
-                        );
-                        let _ = tokio::fs::remove_file(&local_path).await;
-                        last_err = Some(anyhow!("hash mismatch for downloaded {filename}"));
-                    } else {
-                        success = true;
-                        break;
-                    }
+                    success = true;
+                    break;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -339,7 +528,8 @@ where
 }
 
 /// Download model files using the default pinned revision and the built-in
-/// trusted manifest. Verification is mandatory, never trust-on-first-use.
+/// trusted manifest (hashes, sizes, and default timeouts). Verification is
+/// mandatory, never trust-on-first-use.
 pub async fn download_models<F>(
     cache_dir: &Path,
     hf_token: Option<&str>,
@@ -348,12 +538,13 @@ pub async fn download_models<F>(
 where
     F: Fn(f32) + Send + Sync + 'static,
 {
-    let hashes = builtin_trusted_hashes()?;
+    let trust = builtin_trust()?;
     download_models_with_options(
         cache_dir,
         hf_token,
         DEFAULT_MODEL_REVISION,
-        &hashes,
+        &trust,
+        &DownloadLimits::default(),
         on_progress,
     )
     .await
@@ -362,9 +553,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     fn builtin() -> ExpectedHashes {
         builtin_trusted_hashes().expect("built-in manifest must load")
+    }
+
+    fn builtin_trust_for_test() -> ExpectedTrust {
+        builtin_trust().expect("built-in trust must load")
+    }
+
+    fn trust_with(hashes: ExpectedHashes, sizes: Option<ExpectedSizes>) -> ExpectedTrust {
+        ExpectedTrust { hashes, sizes }
     }
 
     #[test]
@@ -377,6 +577,18 @@ mod tests {
             hashes["config.json"],
             "4099082b107a9d4029849ac76b89eca65e03732660969c2babe5bf308c7357f2"
         );
+    }
+
+    #[test]
+    fn builtin_manifest_carries_exact_sizes() {
+        let sizes = builtin_trusted_sizes().expect("built-in sizes must load");
+        assert_eq!(sizes.len(), MODEL_FILES.len());
+        assert!(validate_sizes(&sizes).is_ok());
+        // Spot-checks against the pinned revision (verified 2026-09-16
+        // against hash-matching local copies of the pinned files).
+        assert_eq!(sizes["config.json"], 174);
+        assert_eq!(sizes["onnx/vector_estimator.onnx"], 256_534_781);
+        assert_eq!(sizes["onnx/vocoder.onnx"], 101_424_195);
     }
 
     #[test]
@@ -409,6 +621,42 @@ mod tests {
     }
 
     #[test]
+    fn manifest_shapes_must_not_mix() {
+        let mut entries: HashMap<String, ManifestEntry> = HashMap::new();
+        for name in MODEL_FILES {
+            entries.insert(name.to_string(), ManifestEntry::HashOnly("0".repeat(64)));
+        }
+        entries.insert(
+            "config.json".to_string(),
+            ManifestEntry::WithSize {
+                sha256: "0".repeat(64),
+                size: 174,
+            },
+        );
+        assert!(split_manifest(&entries).is_err());
+    }
+
+    #[test]
+    fn legacy_hash_only_manifest_loads_without_sizes() {
+        let dir = std::env::temp_dir().join(format!("sonicboom-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.json");
+        let json = serde_json::to_string(&builtin()).unwrap();
+        std::fs::write(&path, json).unwrap();
+        let trust = load_expected_trust(path.to_str().unwrap()).unwrap();
+        assert_eq!(trust.hashes.len(), MODEL_FILES.len());
+        assert!(trust.sizes.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn zero_size_is_rejected() {
+        let mut sizes = builtin_trusted_sizes().unwrap();
+        sizes.insert("config.json".to_string(), 0);
+        assert!(validate_sizes(&sizes).is_err());
+    }
+
+    #[test]
     fn commit_sha_validation() {
         assert!(is_valid_commit_sha(DEFAULT_MODEL_REVISION));
         assert!(is_valid_commit_sha(
@@ -433,9 +681,10 @@ mod tests {
     #[test]
     fn resolve_trust_couples_custom_revisions_to_manifests() {
         // Default revision works out of the box.
-        let (rev, hashes) = resolve_trust(DEFAULT_MODEL_REVISION, None).unwrap();
+        let (rev, trust) = resolve_trust(DEFAULT_MODEL_REVISION, None).unwrap();
         assert_eq!(rev, DEFAULT_MODEL_REVISION);
-        assert_eq!(hashes.len(), MODEL_FILES.len());
+        assert_eq!(trust.hashes.len(), MODEL_FILES.len());
+        assert!(trust.sizes.is_some());
         // Custom revision without a custom manifest fails.
         let custom = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert!(resolve_trust(custom, None).is_err());
@@ -451,9 +700,9 @@ mod tests {
         let json = serde_json::to_string(&builtin()).unwrap();
         std::fs::write(&path, json).unwrap();
         let custom = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let (rev, hashes) = resolve_trust(custom, Some(path.to_str().unwrap())).unwrap();
+        let (rev, trust) = resolve_trust(custom, Some(path.to_str().unwrap())).unwrap();
         assert_eq!(rev, custom);
-        assert_eq!(hashes.len(), MODEL_FILES.len());
+        assert_eq!(trust.hashes.len(), MODEL_FILES.len());
         // Partial custom manifest fails.
         std::fs::write(&path, r#"{"config.json": "0"}"#).unwrap();
         assert!(resolve_trust(custom, Some(path.to_str().unwrap())).is_err());
@@ -488,14 +737,15 @@ mod tests {
             "onnx/vocoder.onnx".to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
         );
+        let trust = trust_with(hashes, None);
         // Wrong content for a trusted name is rejected, not recorded.
-        assert!(!verify_cached_file("onnx/vocoder.onnx", &file, &hashes).unwrap());
+        assert!(!verify_cached_file("onnx/vocoder.onnx", &file, &trust).unwrap());
         assert!(
             !dir.join("model.onnx.sha256").exists(),
             "no sidecar trust may be created"
         );
         // Unknown names are rejected even if the file exists.
-        assert!(verify_cached_file("unknown.bin", &file, &hashes).is_err());
+        assert!(verify_cached_file("unknown.bin", &file, &trust).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -513,7 +763,33 @@ mod tests {
             "onnx/vocoder.onnx".to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
         );
-        assert!(verify_cached_file("onnx/vocoder.onnx", &file, &hashes).unwrap());
+        let trust = trust_with(hashes, None);
+        assert!(verify_cached_file("onnx/vocoder.onnx", &file, &trust).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cached_file_with_wrong_size_is_rejected_before_hashing() {
+        let dir =
+            std::env::temp_dir().join(format!("sonicboom-verify-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("model.onnx");
+        std::fs::write(&file, b"abc").unwrap(); // 3 bytes
+        let mut hashes = ExpectedHashes::new();
+        let mut sizes = ExpectedSizes::new();
+        for name in MODEL_FILES {
+            hashes.insert(name.to_string(), "0".repeat(64));
+            sizes.insert(name.to_string(), 1);
+        }
+        // Correct digest for "abc", wrong size: must be rejected without
+        // needing the digest comparison to fail.
+        hashes.insert(
+            "onnx/vocoder.onnx".to_string(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
+        );
+        sizes.insert("onnx/vocoder.onnx".to_string(), 999);
+        let trust = trust_with(hashes, Some(sizes));
+        assert!(!verify_cached_file("onnx/vocoder.onnx", &file, &trust).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -521,15 +797,218 @@ mod tests {
     fn download_rejects_mutable_revision_without_network() {
         // Validation happens before any network/cache work: an invalid
         // revision fails even with an unusable cache dir.
-        let hashes = builtin();
+        let trust = builtin_trust_for_test();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(download_models_with_options(
             Path::new("/nonexistent-sonicboom-cache-dir"),
             None,
             "main",
-            &hashes,
+            &trust,
+            &DownloadLimits::default(),
             |_| {},
         ));
         assert!(result.is_err());
+    }
+
+    // --- Local-server download tests (no external network) ---
+
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// Serve one canned HTTP response on loopback, then stop.
+    async fn serve_once(response: Vec<u8>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(&response).await;
+            }
+        });
+        (addr, handle)
+    }
+
+    fn plain_response(body: &[u8], content_length: Option<usize>) -> Vec<u8> {
+        let mut head = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n".to_vec();
+        if let Some(len) = content_length {
+            head.extend_from_slice(format!("Content-Length: {len}\r\n").as_bytes());
+        }
+        head.extend_from_slice(b"Connection: close\r\n\r\n");
+        head.extend_from_slice(body);
+        head
+    }
+
+    fn test_client(limits: &DownloadLimits) -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(limits.connect_timeout)
+            .timeout(limits.timeout)
+            .build()
+            .unwrap()
+    }
+
+    fn download_scratch(test: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sonicboom-download-{test}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn content_length_mismatch_is_rejected() {
+        let dir = download_scratch("content-length");
+        let dest = dir.join("file.bin");
+        // Server claims 100 bytes; trusted size is 3.
+        let (addr, server) = serve_once(plain_response(b"abc", Some(100))).await;
+        let client = test_client(&DownloadLimits::default());
+        let err = download_file(
+            &client,
+            &format!("http://{addr}/file.bin"),
+            &dest,
+            Some("SECRET-HF-TOKEN"),
+            ABC_SHA256,
+            Some(3),
+        )
+        .await
+        .expect_err("content-length mismatch must fail");
+        assert!(err.to_string().contains("content-length"), "{err}");
+        assert!(!err.to_string().contains("SECRET-HF-TOKEN"), "{err}");
+        assert!(!dest.exists());
+        assert!(!dir.join("file.download").exists());
+        server.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_stream_is_aborted_and_cleaned() {
+        let dir = download_scratch("oversize");
+        let dest = dir.join("file.bin");
+        // No content-length; 10 streaming bytes against a trusted size of 3.
+        let (addr, server) = serve_once(plain_response(b"0123456789", None)).await;
+        let client = test_client(&DownloadLimits::default());
+        let err = download_file(
+            &client,
+            &format!("http://{addr}/file.bin"),
+            &dest,
+            None,
+            ABC_SHA256,
+            Some(3),
+        )
+        .await
+        .expect_err("oversized stream must abort");
+        assert!(err.to_string().contains("exceeded trusted size"), "{err}");
+        assert!(!dest.exists());
+        assert!(!dir.join("file.download").exists());
+        server.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn undersized_stream_fails() {
+        let dir = download_scratch("undersize");
+        let dest = dir.join("file.bin");
+        let (addr, server) = serve_once(plain_response(b"ab", Some(2))).await;
+        let client = test_client(&DownloadLimits::default());
+        let err = download_file(
+            &client,
+            &format!("http://{addr}/file.bin"),
+            &dest,
+            None,
+            ABC_SHA256,
+            Some(3),
+        )
+        .await
+        .expect_err("undersized stream must fail");
+        // Content-length (2) already disagrees with the trusted size (3).
+        assert!(err.to_string().contains("trusted size"), "{err}");
+        assert!(!dest.exists());
+        server.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hash_mismatch_never_reaches_final_path() {
+        let dir = download_scratch("hash-mismatch");
+        let dest = dir.join("file.bin");
+        // Right size (3), wrong content.
+        let (addr, server) = serve_once(plain_response(b"xyz", Some(3))).await;
+        let client = test_client(&DownloadLimits::default());
+        let err = download_file(
+            &client,
+            &format!("http://{addr}/file.bin"),
+            &dest,
+            None,
+            ABC_SHA256,
+            Some(3),
+        )
+        .await
+        .expect_err("hash mismatch must fail");
+        assert!(err.to_string().contains("hash mismatch"), "{err}");
+        assert!(!dest.exists(), "unverified bytes at final path");
+        assert!(!dir.join("file.download").exists());
+        server.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn verified_download_lands_at_final_path() {
+        let dir = download_scratch("verified");
+        let dest = dir.join("file.bin");
+        let (addr, server) = serve_once(plain_response(b"abc", Some(3))).await;
+        let client = test_client(&DownloadLimits::default());
+        download_file(
+            &client,
+            &format!("http://{addr}/file.bin"),
+            &dest,
+            None,
+            ABC_SHA256,
+            Some(3),
+        )
+        .await
+        .expect("verified download must succeed");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+        assert!(!dir.join("file.download").exists());
+        server.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_timeout_cleans_temporary_file() {
+        let dir = download_scratch("timeout");
+        let dest = dir.join("file.bin");
+        // Server accepts but never responds.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        let limits = DownloadLimits::new(5, 1);
+        let client = test_client(&limits);
+        let err = download_file(
+            &client,
+            &format!("http://{addr}/file.bin"),
+            &dest,
+            Some("SECRET-HF-TOKEN"),
+            ABC_SHA256,
+            Some(3),
+        )
+        .await
+        .expect_err("stalled download must time out");
+        assert!(!err.to_string().contains("SECRET-HF-TOKEN"), "{err}");
+        assert!(!dest.exists());
+        assert!(!dir.join("file.download").exists());
+        server.abort();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

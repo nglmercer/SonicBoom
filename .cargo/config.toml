@@ -3,7 +3,7 @@
 # that cross-compiling to Linux (`x86_64-unknown-linux-gnu`) does not
 # inherit macOS Homebrew paths and break glib/gobject/pkg-config probing.
 [target.x86_64-apple-darwin.env]
-PKG_CONFIG_PATH = "/opt/homebrew/lib/pkgconfig"
+PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig"
 
 [target.aarch64-apple-darwin.env]
 PKG_CONFIG_PATH = "/opt/homebrew/lib/pkgconfig"

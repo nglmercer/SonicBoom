@@ -29,7 +29,7 @@ Synthesizes text to speech audio.
 | --------- | ------ | -------- | ------- | -------------------------------------- |
 | `voice`   | string | No       | `M1`    | Voice style (M1-M5, F1-F5)             |
 | `lang`    | string | No       | `en`    | Language code                          |
-| `format`  | string | No       | `opus`  | Output format: `opus`, `wav`, `mp3`, or `flac` |
+| `format`  | string | No       | `opus`  | Output format: `opus`, `wav`, `mp3`, or `flac` (unknown → `400`) |
 
 **Request Body:** Plain text string (max `MAX_TEXT_LENGTH` Unicode chars,
 body capped at `TTS_MAX_BODY_BYTES`)
@@ -96,7 +96,8 @@ Check if the model is loaded and ready.
 
 **Endpoint:** `GET /api/status`
 
-**Authentication:** None
+**Authentication:** None (public metadata endpoint exposing only
+non-sensitive load status; see [OpenAI docs](openai.md#public-metadata-endpoints))
 
 **Response:** JSON object with model status
 
@@ -150,7 +151,9 @@ Queue files must live inside the server's `ALLOWED_AUDIO_DIR` (canonicalized;
 `..` escapes, symlink escapes, directories, missing files, and non-audio
 extensions `.wav/.mp3/.flac/.ogg/.opus` are rejected). All queue endpoints
 require bearer authentication. Error responses use `success: false` with an
-appropriate status (`400`/`401`/`403`/`503`) and never echo server paths.
+appropriate status (`400`/`401`/`403`/`429`/`503`) and never echo server
+paths. A full playback queue (`MAX_PLAYBACK_QUEUE_ITEMS`) returns `429`;
+a dead audio thread returns `503`.
 
 **Example:**
 
@@ -199,7 +202,7 @@ Adjust the master volume for audio playback.
 
 | Field    | Type  | Required | Description                                   |
 | -------- | ----- | -------- | --------------------------------------------- |
-| `volume` | float | Yes      | Volume level from `0.0` (mute) to `1.0` (max) |
+| `volume` | float | Yes      | Volume level from `0.0` (mute) to `1.0` (max); out-of-range or non-finite values → `400` (never silently clamped) |
 
 **Example:**
 
@@ -332,9 +335,13 @@ SonicBoom supports multiple audio output formats:
 
 | Format | Content-Type | Description                              |
 | ------ | ------------ | ---------------------------------------- |
-| `opus` | `audio/opus` | Default Opus/OGG format (recommended)    |
+| `opus` | `audio/ogg; codecs=opus` | Default Opus/OGG format (recommended) |
 | `wav`  | `audio/wav`  | WAV format (PCM 16-bit)                  |
-| `mp3`  | `audio/mpeg` | MP3 format (currently falls back to WAV) |
+| `mp3`  | `audio/mpeg` | MP3 format                               |
+| `flac` | `audio/flac` | FLAC format                              |
+
+Unknown formats return `400`; each response is one fully encoded audio
+buffer (not an incremental stream).
 
 ### Using Format Parameter
 
@@ -360,17 +367,20 @@ curl -X POST http://localhost:3000/v1/audio/speech \
 
 ### Success Response
 
-- **Content-Type:** `audio/opus`, `audio/wav`, or `audio/mpeg` (based on format)
+- **Content-Type:** `audio/ogg; codecs=opus`, `audio/wav`, `audio/mpeg`, or `audio/flac` (based on format)
 - **Body:** Raw audio data
 
 ### Error Response
 
 - **Content-Type:** `application/json`
-- **Body:** Error message
+- **Body:** Stable error object (never paths, secrets, or internals)
 
 ```json
 {
-  "error": "Model is downloading (50% complete)."
+  "error": "service_unavailable",
+  "message": "Model is downloading (50% complete).",
+  "status": 503,
+  "request_id": "01234567-89ab-cdef-0123-456789abcdef"
 }
 ```
 
