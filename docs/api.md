@@ -290,6 +290,10 @@ SonicBoom uses Bearer token authentication. Include your API token in the `Autho
 -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
 
+The syntax is strict: only `Bearer <token>` is accepted (scheme name is
+case-insensitive). Raw tokens without the scheme, `Basic`, `Token`, empty
+bearer values, and extra whitespace are all rejected with `401`.
+
 ### Optional Authentication
 
 For development or public APIs, you can disable authentication:
@@ -309,7 +313,8 @@ When disabled, API requests work without any token.
 
 ### Sample Token
 
-For development, you can enable a sample token:
+For local development only, you can enable a sample token (the server
+logs a prominent warning while it is enabled; never use in production):
 
 ```bash
 export ENABLE_SAMPLE_TOKEN=1

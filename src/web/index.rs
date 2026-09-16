@@ -67,12 +67,8 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
     let html = TEMPLATE
         .replace("STATUS_MSG", &status_msg)
         .replace(
-            "BLOCK_STATUS",
-            if status_msg.is_empty() {
-                "none"
-            } else {
-                "block"
-            },
+            "STATUS_HIDDEN",
+            if status_msg.is_empty() { "hidden" } else { "" },
         )
         .replace(
             "VOICE_OPTIONS",
@@ -92,4 +88,19 @@ pub async fn get_index(State(state): State<AppState>) -> Response {
         html,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TEMPLATE;
+
+    #[test]
+    fn index_template_has_no_inline_script_or_style() {
+        assert!(!TEMPLATE.contains("<script>"), "inline script found");
+        assert!(!TEMPLATE.contains("<style>"), "inline style found");
+        assert!(!TEMPLATE.contains("style="), "inline style attribute found");
+        assert!(TEMPLATE.contains(r#"<script src="/static/index.js" defer></script>"#));
+        assert!(TEMPLATE.contains(r#"<link rel="stylesheet" href="/static/index.css">"#));
+        assert!(TEMPLATE.contains("data-model-ready="));
+    }
 }

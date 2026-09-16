@@ -1,15 +1,23 @@
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const MODEL_REPO: &str = "Supertone/supertonic-3";
 
 /// Default pinned HuggingFace revision (immutable commit SHA). Overridable
-/// via `MODEL_REVISION`; never defaults to the mutable `main` branch.
+/// via `MODEL_REVISION`, which must itself be a 40-hex commit SHA; a custom
+/// revision additionally requires an explicit trusted manifest.
 pub const DEFAULT_MODEL_REVISION: &str = "3cadd1ee6394adea1bd021217a0e650ede09a323";
 
-const MODEL_FILES: &[&str] = &[
+/// Built-in trust root: expected SHA-256 digests for every model file at
+/// [`DEFAULT_MODEL_REVISION`], compiled into the binary so the default
+/// installation is verified out of the box.
+const TRUSTED_MODEL_HASHES_JSON: &str = include_str!("../../models.sha256.json");
+
+/// Authoritative list of model files. Every entry must have a trusted digest
+/// before any file is accepted (see [`validate_manifest`]).
+pub const MODEL_FILES: &[&str] = &[
     "onnx/duration_predictor.onnx",
     "onnx/text_encoder.onnx",
     "onnx/vector_estimator.onnx",
@@ -42,19 +50,86 @@ pub struct ModelPaths {
 /// Expected SHA-256 digests keyed by repository-relative filename.
 pub type ExpectedHashes = HashMap<String, String>;
 
-/// Load an expected-hashes manifest: JSON object mapping
-/// `"<repo-relative path>" -> "<sha256 hex>"`.
+/// Immutable-revision check: exactly 40 hexadecimal characters (a full Git
+/// commit SHA). Rejects `main`, tags, short SHAs, and anything else mutable.
+pub fn is_valid_commit_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_sha256(name: &str, digest: &str) -> Result<()> {
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid sha256 for '{name}': must be 64 hex chars");
+    }
+    Ok(())
+}
+
+/// Validate that a manifest is complete and well-formed: every
+/// [`MODEL_FILES`] entry present with a valid digest, and no unexpected keys
+/// (source/manifest drift fails loudly).
+pub fn validate_manifest(hashes: &ExpectedHashes) -> Result<()> {
+    for filename in MODEL_FILES {
+        let expected = hashes
+            .get(*filename)
+            .ok_or_else(|| anyhow!("missing trusted digest for {filename}"))?;
+        validate_sha256(filename, expected)?;
+    }
+    for key in hashes.keys() {
+        if !MODEL_FILES.contains(&key.as_str()) {
+            anyhow::bail!("unexpected model digest entry: {key}");
+        }
+    }
+    Ok(())
+}
+
+/// Parse and validate the compiled-in trusted manifest.
+pub fn builtin_trusted_hashes() -> Result<ExpectedHashes> {
+    let hashes: ExpectedHashes = serde_json::from_str(TRUSTED_MODEL_HASHES_JSON)
+        .context("built-in model hash manifest is not valid JSON")?;
+    validate_manifest(&hashes).context("built-in model hash manifest is invalid")?;
+    Ok(hashes)
+}
+
+/// Load an operator-provided expected-hashes manifest: JSON object mapping
+/// `"<repo-relative path>" -> "<sha256 hex>"`. The manifest must be complete
+/// (see [`validate_manifest`]); partial manifests fail closed.
 pub fn load_expected_hashes(path: &str) -> Result<ExpectedHashes> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("cannot read model hashes file '{path}'"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("model hashes file '{path}' is not a regular file");
+    }
     let data = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read model hashes file '{path}'"))?;
     let hashes: ExpectedHashes =
         serde_json::from_str(&data).with_context(|| "model hashes file is not valid JSON")?;
-    for (name, digest) in &hashes {
-        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-            anyhow::bail!("invalid sha256 for '{name}': must be 64 hex chars");
-        }
-    }
+    validate_manifest(&hashes).with_context(|| "model hashes file is incomplete or invalid")?;
     Ok(hashes)
+}
+
+/// Resolve the (revision, trusted hashes) pair under one policy shared by the
+/// HTTP server and the reusable engine:
+///
+/// - default revision + no custom manifest → built-in trusted manifest;
+/// - any revision + custom manifest → the validated custom manifest;
+/// - custom revision + no custom manifest → hard error (never pair a custom
+///   revision with another revision's hashes).
+pub fn resolve_trust(
+    revision: &str,
+    custom_manifest_path: Option<&str>,
+) -> Result<(String, ExpectedHashes)> {
+    if !is_valid_commit_sha(revision) {
+        anyhow::bail!("MODEL_REVISION must be a 40-character commit SHA, got '{revision}'");
+    }
+    if let Some(path) = custom_manifest_path {
+        let hashes = load_expected_hashes(path)?;
+        return Ok((revision.to_string(), hashes));
+    }
+    if revision != DEFAULT_MODEL_REVISION {
+        anyhow::bail!(
+            "custom MODEL_REVISION requires MODEL_SHA256_JSON_PATH with trusted hashes for that exact revision"
+        );
+    }
+    Ok((revision.to_string(), builtin_trusted_hashes()?))
 }
 
 pub fn sha256_of_file(path: &Path) -> Result<String> {
@@ -64,19 +139,13 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn sidecar_path(dest: &Path) -> PathBuf {
-    let mut name = dest.file_name().map(|n| n.to_owned()).unwrap_or_default();
-    name.push(".sha256");
-    dest.with_file_name(name)
-}
-
-/// Verify a cached file: against the expected manifest when available,
-/// otherwise against the sidecar digest written at download time
-/// (trust-on-first-use tamper evidence for the local cache).
+/// Verify a cached file against its previously trusted digest. There is no
+/// trust-on-first-use: without a matching trusted digest the file is
+/// rejected (the caller deletes and redownloads it).
 fn verify_cached_file(
     filename: &str,
     local_path: &Path,
-    expected: Option<&ExpectedHashes>,
+    expected: &ExpectedHashes,
 ) -> Result<bool> {
     if !local_path.is_file()
         || !std::fs::metadata(local_path)
@@ -85,36 +154,15 @@ fn verify_cached_file(
     {
         return Ok(false);
     }
+    let want = expected
+        .get(filename)
+        .ok_or_else(|| anyhow!("missing trusted digest for {filename}"))?;
     let actual = sha256_of_file(local_path)?;
-    if let Some(hashes) = expected
-        && let Some(want) = hashes.get(filename)
-    {
-        if constant_time_eq_str(&actual, want) {
-            return Ok(true);
-        }
-        tracing::warn!("hash mismatch for cached {filename}: expected manifest digest");
-        return Ok(false);
+    if constant_time_eq_str(&actual, want) {
+        return Ok(true);
     }
-    // No manifest: compare against the sidecar recorded at download time.
-    let sidecar = sidecar_path(local_path);
-    match std::fs::read_to_string(&sidecar) {
-        Ok(recorded) if constant_time_eq_str(actual.trim(), recorded.trim()) => Ok(true),
-        Ok(_) => {
-            tracing::warn!("hash mismatch for cached {filename}: differs from recorded digest");
-            Ok(false)
-        }
-        Err(_) => {
-            // Legacy cache without a sidecar: record current digest
-            // (trust-on-first-use) so future tampering is detected.
-            tracing::warn!(
-                "no recorded digest for cached {filename}; recording current hash (trust-on-first-use)"
-            );
-            if std::fs::write(&sidecar, &actual).is_err() {
-                tracing::warn!("could not write sidecar digest for {filename}");
-            }
-            Ok(true)
-        }
-    }
+    tracing::warn!("hash mismatch for cached {filename}: expected trusted digest");
+    Ok(false)
 }
 
 fn constant_time_eq_str(a: &str, b: &str) -> bool {
@@ -171,23 +219,24 @@ async fn download_file(
 
 /// Download (or reuse cached) model files pinned to `revision`.
 ///
-/// Every reused or downloaded file is integrity-checked: against
-/// `expected_hashes` when provided, otherwise against the sidecar digest
-/// recorded at download time. Mismatches trigger deletion + redownload; a
-/// persistent mismatch fails safely instead of loading an unverified model.
+/// Every file — cached or freshly downloaded — is accepted only after its
+/// SHA-256 matches the previously trusted `expected_hashes`. Mismatches
+/// trigger deletion + redownload; a persistent mismatch fails instead of
+/// loading an unverified model.
 pub async fn download_models_with_options<F>(
     cache_dir: &Path,
     hf_token: Option<&str>,
     revision: &str,
-    expected_hashes: Option<&ExpectedHashes>,
+    expected_hashes: &ExpectedHashes,
     on_progress: F,
 ) -> Result<ModelPaths>
 where
     F: Fn(f32) + Send + Sync + 'static,
 {
-    if revision.trim().is_empty() {
-        anyhow::bail!("model revision must not be empty");
+    if !is_valid_commit_sha(revision) {
+        anyhow::bail!("model revision must be a 40-character commit SHA");
     }
+    validate_manifest(expected_hashes)?;
     std::fs::create_dir_all(cache_dir)?;
     let cache_path = cache_dir
         .canonicalize()
@@ -205,7 +254,7 @@ where
         // Preserve subdirectory structure from filename
         let local_path = cache_path.join(filename.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-        // Reuse only verified non-empty regular files.
+        // Reuse only files verified against the trusted manifest.
         match verify_cached_file(filename, &local_path, expected_hashes) {
             Ok(true) => {
                 tracing::info!("Already cached (verified): {filename}");
@@ -232,10 +281,10 @@ where
                 Ok(()) => {
                     // Verify what we just wrote before accepting it.
                     let digest = sha256_of_file(&local_path)?;
-                    if let Some(hashes) = expected_hashes
-                        && let Some(want) = hashes.get(filename)
-                        && !constant_time_eq_str(&digest, want)
-                    {
+                    let want = expected_hashes
+                        .get(filename)
+                        .ok_or_else(|| anyhow!("missing trusted digest for {filename}"))?;
+                    if !constant_time_eq_str(&digest, want) {
                         tracing::warn!(
                             "Downloaded {filename} failed hash verification (attempt {})",
                             attempt + 1
@@ -243,11 +292,6 @@ where
                         let _ = tokio::fs::remove_file(&local_path).await;
                         last_err = Some(anyhow!("hash mismatch for downloaded {filename}"));
                     } else {
-                        // Record the digest for future cache verification.
-                        let sidecar = sidecar_path(&local_path);
-                        if let Err(e) = std::fs::write(&sidecar, &digest) {
-                            tracing::warn!("could not write digest sidecar: {e}");
-                        }
                         success = true;
                         break;
                     }
@@ -294,8 +338,8 @@ where
     })
 }
 
-/// Backwards-compatible entry point using the pinned default revision and
-/// sidecar-based cache verification.
+/// Download model files using the default pinned revision and the built-in
+/// trusted manifest. Verification is mandatory, never trust-on-first-use.
 pub async fn download_models<F>(
     cache_dir: &Path,
     hf_token: Option<&str>,
@@ -304,11 +348,12 @@ pub async fn download_models<F>(
 where
     F: Fn(f32) + Send + Sync + 'static,
 {
+    let hashes = builtin_trusted_hashes()?;
     download_models_with_options(
         cache_dir,
         hf_token,
         DEFAULT_MODEL_REVISION,
-        None,
+        &hashes,
         on_progress,
     )
     .await
@@ -317,6 +362,105 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn builtin() -> ExpectedHashes {
+        builtin_trusted_hashes().expect("built-in manifest must load")
+    }
+
+    #[test]
+    fn builtin_manifest_is_complete_and_valid() {
+        let hashes = builtin();
+        assert_eq!(hashes.len(), MODEL_FILES.len());
+        assert!(validate_manifest(&hashes).is_ok());
+        // Spot-check one pinned digest (config.json at the pinned revision).
+        assert_eq!(
+            hashes["config.json"],
+            "4099082b107a9d4029849ac76b89eca65e03732660969c2babe5bf308c7357f2"
+        );
+    }
+
+    #[test]
+    fn partial_manifest_is_rejected() {
+        let mut hashes = builtin();
+        hashes.remove("config.json");
+        assert!(validate_manifest(&hashes).is_err());
+        assert!(validate_manifest(&ExpectedHashes::new()).is_err());
+    }
+
+    #[test]
+    fn unexpected_manifest_key_is_rejected() {
+        let mut hashes = builtin();
+        hashes.insert("evil.bin".to_string(), "0".repeat(64));
+        assert!(validate_manifest(&hashes).is_err());
+    }
+
+    #[test]
+    fn malformed_hash_is_rejected() {
+        for bad in [
+            "not-a-hash",
+            &"0".repeat(63),
+            &"0".repeat(65),
+            &"z".repeat(64),
+        ] {
+            let mut hashes = builtin();
+            hashes.insert("config.json".to_string(), bad.to_string());
+            assert!(validate_manifest(&hashes).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn commit_sha_validation() {
+        assert!(is_valid_commit_sha(DEFAULT_MODEL_REVISION));
+        assert!(is_valid_commit_sha(
+            "3CADD1EE6394ADEA1BD021217A0E650EDE09A323"
+        ));
+        for bad in [
+            "",
+            "main",
+            "master",
+            "latest",
+            "refs/heads/main",
+            "v3",
+            "abc123",
+            "3cadd1ee6394adea1bd021217a0e650ede09a32", // 39 chars
+            "3cadd1ee6394adea1bd021217a0e650ede09a323f", // 41 chars
+            "zcadd1ee6394adea1bd021217a0e650ede09a323", // non-hex
+        ] {
+            assert!(!is_valid_commit_sha(bad), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_trust_couples_custom_revisions_to_manifests() {
+        // Default revision works out of the box.
+        let (rev, hashes) = resolve_trust(DEFAULT_MODEL_REVISION, None).unwrap();
+        assert_eq!(rev, DEFAULT_MODEL_REVISION);
+        assert_eq!(hashes.len(), MODEL_FILES.len());
+        // Custom revision without a custom manifest fails.
+        let custom = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(resolve_trust(custom, None).is_err());
+        // Mutable revision names fail even before manifest checks.
+        assert!(resolve_trust("main", None).is_err());
+    }
+
+    #[test]
+    fn resolve_trust_accepts_complete_custom_manifest() {
+        let dir = std::env::temp_dir().join(format!("sonicboom-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom.json");
+        let json = serde_json::to_string(&builtin()).unwrap();
+        std::fs::write(&path, json).unwrap();
+        let custom = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let (rev, hashes) = resolve_trust(custom, Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(rev, custom);
+        assert_eq!(hashes.len(), MODEL_FILES.len());
+        // Partial custom manifest fails.
+        std::fs::write(&path, r#"{"config.json": "0"}"#).unwrap();
+        assert!(resolve_trust(custom, Some(path.to_str().unwrap())).is_err());
+        // Directory instead of a file fails.
+        assert!(resolve_trust(custom, Some(dir.to_str().unwrap())).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sha256_of_file_matches_known_digest() {
@@ -331,41 +475,61 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mismatch_rejects_cached_file() {
+    fn tampered_cached_file_is_rejected_without_tofu_fallback() {
         let dir = std::env::temp_dir().join(format!("sonicboom-verify-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("model.onnx");
         std::fs::write(&file, b"tampered-bytes").unwrap();
         let mut hashes = ExpectedHashes::new();
+        for name in MODEL_FILES {
+            hashes.insert(name.to_string(), "0".repeat(64));
+        }
         hashes.insert(
-            "model.onnx".to_string(),
+            "onnx/vocoder.onnx".to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
         );
-        assert!(!verify_cached_file("model.onnx", &file, Some(&hashes)).unwrap());
+        // Wrong content for a trusted name is rejected, not recorded.
+        assert!(!verify_cached_file("onnx/vocoder.onnx", &file, &hashes).unwrap());
+        assert!(
+            !dir.join("model.onnx.sha256").exists(),
+            "no sidecar trust may be created"
+        );
+        // Unknown names are rejected even if the file exists.
+        assert!(verify_cached_file("unknown.bin", &file, &hashes).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn manifest_match_accepts_cached_file() {
+    fn known_matching_file_is_accepted() {
         let dir = std::env::temp_dir().join(format!("sonicboom-verify-ok-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("model.onnx");
         std::fs::write(&file, b"abc").unwrap();
         let mut hashes = ExpectedHashes::new();
+        for name in MODEL_FILES {
+            hashes.insert(name.to_string(), "0".repeat(64));
+        }
         hashes.insert(
-            "model.onnx".to_string(),
+            "onnx/vocoder.onnx".to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
         );
-        assert!(verify_cached_file("model.onnx", &file, Some(&hashes)).unwrap());
+        assert!(verify_cached_file("onnx/vocoder.onnx", &file, &hashes).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn invalid_manifest_is_rejected() {
-        let path =
-            std::env::temp_dir().join(format!("sonicboom-manifest-{}.json", std::process::id()));
-        std::fs::write(&path, r#"{"a.onnx": "not-a-hash"}"#).unwrap();
-        assert!(load_expected_hashes(path.to_str().unwrap()).is_err());
-        std::fs::remove_file(&path).unwrap();
+    fn download_rejects_mutable_revision_without_network() {
+        // Validation happens before any network/cache work: an invalid
+        // revision fails even with an unusable cache dir.
+        let hashes = builtin();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(download_models_with_options(
+            Path::new("/nonexistent-sonicboom-cache-dir"),
+            None,
+            "main",
+            &hashes,
+            |_| {},
+        ));
+        assert!(result.is_err());
     }
 }

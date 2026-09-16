@@ -125,6 +125,7 @@ mod tests {
             cookie_secure: false,
             admin_session_expiry_secs: 60,
             temp_audio_dir: "./temp_audio".to_string(),
+            enable_hsts: false,
         }
     }
 

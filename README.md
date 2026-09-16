@@ -12,6 +12,7 @@ This README serves as an index to all SonicBoom documentation:
 | [OpenAI-Compatible API](docs/openai.md) | OpenAI TTS API compatible endpoints |
 | [Admin Panel](docs/admin.md)            | Admin panel guide                   |
 | [Configuration](docs/config.md)         | Environment variables and settings  |
+| [Security](SECURITY.md)                   | Security policy and credential rotation |
 
 ---
 
@@ -68,6 +69,7 @@ The server will:
 - **ONNX Runtime Inference** - Supertonic 3 with hardware acceleration (CoreML on Apple Silicon, CUDA/ROCm on Linux via `--features cuda`/`--features rocm`)
 - **Streaming Audio Output** - Real-time Opus/OGG encoding
 - **Token-Based Authentication** - API access control
+- **Verified Model Supply Chain** - Pinned revision with compiled-in SHA-256 integrity checks
 - **Admin Panel** - Web-based management interface
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI TTS
 - **Audio Queue System** - Play audio files directly on the server with queue management

@@ -35,10 +35,16 @@ pub fn init(log_dir: &str, log_level: &str, log_to_file: bool, log_to_stdout: bo
         eprintln!("Warning: Could not create log directory: {}", e);
     }
 
-    // Build the env filter - include tower_http at trace level for request logging
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        format!("SonicBoom={},tower_http=trace,httparse=trace", log_level).into()
-    });
+    // Build the env filter - include tower_http at trace level for request logging.
+    // Logging hygiene: the TraceLayer callbacks used in main.rs log only
+    // method/uri/status/latency. Headers (Authorization, Cookie), bodies
+    // (private TTS text), and secrets (tokens, passwords, HF_TOKEN, CSRF
+    // values) are never emitted by request logging.
+    // NOTE: the level applies globally (not just `SonicBoom`), because the
+    // library (`sonicboom`), ONNX Runtime (`ort`), and model-verification
+    // warnings live under different targets and must stay visible.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| format!("{log_level},tower_http=trace").into());
 
     // Base subscriber
     let base = tracing_subscriber::registry().with(env_filter);

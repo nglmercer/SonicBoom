@@ -13,15 +13,15 @@ start rather than falling back to insecure behavior.
 |----------|---------|-------------|
 | `PORT` | `3000` | Server port |
 | `SONICBOOM_ADMIN_ID` | `admin` | Admin panel username (must not be empty) |
-| `SONICBOOM_ADMIN_PW` | _(none, required)_ | Admin panel password (min 12 chars; no defaults accepted) |
+| `SONICBOOM_ADMIN_PW` | _(none, required)_ | Admin panel password (min 12 Unicode chars; no defaults/placeholders accepted) |
 
 ### Model Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MODEL_CACHE_DIR` | `./models` | Directory for cached ONNX models |
-| `MODEL_REVISION` | pinned SHA (`3cadd1e…`) | Immutable HuggingFace revision for downloads (never `main`) |
-| `MODEL_SHA256_JSON_PATH` | _(unset)_ | Optional JSON manifest of expected SHA-256 digests per model file |
+| `MODEL_REVISION` | pinned SHA (`3cadd1ee…`) | Immutable HuggingFace revision: must be a 40-char commit SHA (never `main`/tags) |
+| `MODEL_SHA256_JSON_PATH` | _(unset)_ | Custom complete SHA-256 manifest; **required** when `MODEL_REVISION` differs from the default |
 | `HF_TOKEN` | - | HuggingFace token for private models |
 | `INFERENCE_STEPS` | `5` | Number of inference steps (1–50) |
 
@@ -46,7 +46,8 @@ start rather than falling back to insecure behavior.
 | `ADMIN_MAX_BODY_BYTES` | `16384` | Body limit for admin forms |
 | `TRUST_PROXY` | `false` | Honor forwarded client-IP headers (only with `TRUSTED_PROXIES`) |
 | `TRUSTED_PROXIES` | _(empty)_ | Comma-separated proxy IPs/CIDRs trusted for `X-Forwarded-For` |
-| `COOKIE_SECURE` | `false` | Set `true` when serving HTTPS (admin session cookie) |
+| `COOKIE_SECURE` | `false` | Set `true` when serving HTTPS (admin session cookie; required in production HTTPS) |
+| `ENABLE_HSTS` | `false` | Send `Strict-Transport-Security` (only when all traffic is known-HTTPS) |
 | `ADMIN_SESSION_EXPIRY_SECS` | `28800` | Admin session inactivity expiry (seconds) |
 | `TEMP_AUDIO_DIR` | `./temp_audio` | Directory for temporary playback files |
 
@@ -153,6 +154,16 @@ For stricter setups, add a read-only root filesystem with tmpfs mounts for
 the writable paths, and terminate TLS at a reverse proxy setting
 `COOKIE_SECURE=true`.
 
+### Production HTTPS
+
+Terminate TLS at a reverse proxy (nginx, Caddy, Traefik) in front of
+SonicBoom and forward plain HTTP to the container. Production checklist:
+
+- `COOKIE_SECURE=true` (required for HTTPS deployments).
+- `ENABLE_HSTS=true` only when **all** client traffic is HTTPS.
+- The proxy must forward the real client connection; SonicBoom only honors
+  `X-Forwarded-For` from `TRUSTED_PROXIES` when `TRUST_PROXY=true`.
+
 ---
 
 ## Model Cache
@@ -195,14 +206,22 @@ Once downloaded, they're cached locally in `MODEL_CACHE_DIR`.
 
 ### Integrity Verification
 
-- Downloads are written atomically (temp file + fsync + rename) and each
-  file's SHA-256 is recorded in a `.sha256` sidecar.
-- Cached files are re-verified on startup (sidecar digest, or the
-  `MODEL_SHA256_JSON_PATH` manifest when provided). Mismatches trigger
-  deletion + redownload; persistent mismatches fail safely.
-- For strongest supply-chain guarantees, generate a manifest after a
-  trusted first download (see `models.sha256.example.json`) and set
-  `MODEL_SHA256_JSON_PATH` in production.
+Model authenticity never relies on trust-on-first-use. Expected SHA-256
+digests for all 17 model files at the pinned revision are compiled into
+the binary from `models.sha256.json`:
+
+- Every cached file is hashed and compared to its trusted digest before
+  reuse; mismatches trigger deletion + redownload.
+- Every downloaded file is hashed before acceptance; persistent mismatches
+  fail model preparation instead of loading an unverified model.
+- A custom `MODEL_REVISION` requires `MODEL_SHA256_JSON_PATH` pointing to
+  a complete, valid manifest for that exact revision; otherwise startup
+  fails. The same policy applies to the reusable `SonicBoomEngine`.
+
+To move to a newer upstream revision: download all files at the new commit
+SHA, compute their SHA-256 digests, verify them independently (e.g. two
+separate downloads), then supply them via `MODEL_SHA256_JSON_PATH` together
+with the new `MODEL_REVISION`.
 
 ---
 

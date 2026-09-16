@@ -109,6 +109,7 @@ mod tests {
             cookie_secure: false,
             admin_session_expiry_secs: 60,
             temp_audio_dir: "./temp_audio".to_string(),
+            enable_hsts: false,
         }
     }
 
@@ -157,6 +158,44 @@ mod tests {
             post_status(app, "/api/tts", Some(&valid), "hello").await,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[tokio::test]
+    async fn only_strict_bearer_syntax_is_accepted() {
+        let (app, valid) = test_app().await;
+        // Canonical form works (503 proves it passed authentication).
+        assert_eq!(
+            post_status(app.clone(), "/api/tts", Some(&valid), "hello").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // Scheme is case-insensitive.
+        let request = Request::post("/api/tts")
+            .header("authorization", format!("bearer {valid}"))
+            .body(Body::from("hello"))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // Everything else is rejected.
+        for header in [
+            valid.clone(),
+            "Basic dXNlcjpwYXNz".to_string(),
+            "Token ".to_string() + &valid,
+            "Bearer".to_string(),
+            "Bearer ".to_string(),
+            "Bearer  ".to_string() + &valid,
+        ] {
+            let request = Request::post("/api/tts")
+                .header("authorization", header.clone())
+                .body(Body::from("hello"))
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED,
+                "accepted {header:?}"
+            );
+        }
     }
 
     #[tokio::test]

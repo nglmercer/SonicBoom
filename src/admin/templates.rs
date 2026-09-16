@@ -12,16 +12,9 @@ pub fn login_page(error: Option<&str>) -> String {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SonicBoom Admin - Login</title>
-<style>
-  body {{ font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }}
-  .box {{ background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); width: 300px; }}
-  h1 {{ margin-top: 0; font-size: 1.4rem; }}
-  input {{ width: 100%; padding: 0.5rem; margin-bottom: 1rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }}
-  button {{ width: 100%; padding: 0.6rem; background: #333; color: white; border: none; border-radius: 4px; cursor: pointer; }}
-  .error {{ color: red; margin-bottom: 1rem; }}
-</style>
+<link rel="stylesheet" href="/static/admin.css">
 </head>
-<body>
+<body class="login">
 <div class="box">
   <h1>Admin Login</h1>
   {}
@@ -77,7 +70,7 @@ pub fn admin_page(tokens: &[Token], csrf_token: &str, new_token: Option<&str>) -
                 status,
                 if !t.revoked {
                     format!(
-                        r#"<form method="post" action="/admin/tokens/{}/revoke" style="display:inline">
+                        r#"<form class="inline-form" method="post" action="/admin/tokens/{}/revoke"
       <input type="hidden" name="csrf_token" value="{}">
       <button type="submit">Revoke</button>
     </form>"#,
@@ -111,24 +104,9 @@ pub fn admin_page(tokens: &[Token], csrf_token: &str, new_token: Option<&str>) -
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SonicBoom Admin</title>
-<style>
-  body {{ font-family: sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }}
-  h1 {{ display: flex; justify-content: space-between; align-items: center; }}
-  .logout-form {{ display: inline; }}
-  .logout-form button {{ background: none; color: #666; font-size: 0.9rem; text-decoration: underline; padding: 0; cursor: pointer; border: none; }}
-  table {{ width: 100%; border-collapse: collapse; margin-top: 1rem; }}
-  th, td {{ text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }}
-  th {{ background: #f0f0f0; }}
-  code {{ font-size: 0.8rem; word-break: break-all; }}
-  .create-form {{ margin-top: 2rem; background: #f9f9f9; padding: 1rem; border-radius: 4px; }}
-  .create-form h2 {{ margin-top: 0; }}
-  .new-token {{ margin-top: 1rem; background: #e8f5e9; padding: 1rem; border-radius: 4px; border: 1px solid #a5d6a7; }}
-  input, select {{ padding: 0.4rem; margin-right: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }}
-  button {{ padding: 0.4rem 1rem; background: #333; color: white; border: none; border-radius: 4px; cursor: pointer; }}
-  button[type=submit][name=action][value=revoke] {{ background: #c00; }}
-</style>
+<link rel="stylesheet" href="/static/admin.css">
 </head>
-<body>
+<body class="admin">
 <h1>Token Management
   <form class="logout-form" method="post" action="/admin/logout">
     <input type="hidden" name="csrf_token" value="{}">
@@ -194,5 +172,19 @@ mod tests {
         let html = admin_page(&[], "csrf", Some("raw-token-once"));
         assert!(html.contains("raw-token-once"));
         assert!(html.contains("Copy this token now. It cannot be displayed again."));
+    }
+
+    #[test]
+    fn admin_pages_have_no_inline_script_or_style() {
+        let token = Token::new(hash_token_value("x"), None);
+        for html in [
+            login_page(None),
+            admin_page(std::slice::from_ref(&token), "csrf", None),
+        ] {
+            assert!(!html.contains("<script"), "inline script found");
+            assert!(!html.contains("<style"), "inline style found");
+            assert!(!html.contains("style="), "inline style attribute found");
+            assert!(html.contains(r#"href="/static/admin.css""#));
+        }
     }
 }

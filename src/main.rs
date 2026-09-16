@@ -217,12 +217,17 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
             })?,
     );
 
-    // Load the model integrity manifest early so a bad path fails fast.
-    let expected_hashes = config
-        .model_hashes_path
-        .as_deref()
-        .map(tts::download::load_expected_hashes)
-        .transpose()?;
+    // Resolve model trust early so a bad revision/manifest fails fast,
+    // before any download is attempted.
+    let (model_revision, expected_hashes) =
+        tts::download::resolve_trust(&config.model_revision, config.model_hashes_path.as_deref())?;
+
+    if config.enable_sample_token {
+        tracing::warn!(
+            "ENABLE_SAMPLE_TOKEN is on: the development SAMPLE_TOKEN is accepted. \
+             Never enable this in production."
+        );
+    }
 
     let model_status = Arc::new(RwLock::new(ModelStatus::Idle));
 
@@ -283,7 +288,10 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         .merge(web::router(app_state.clone()))
         .merge(api::router(app_state.clone()))
         .merge(admin::router(admin_state))
-        .layer(axum::middleware::from_fn(security::security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&config),
+            security::security_headers,
+        ))
         .layer(session_layer)
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
@@ -302,7 +310,6 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
 
     let model_cache_dir = config.model_cache_dir.clone();
     let hf_token = config.hf_token.clone();
-    let model_revision = config.model_revision.clone();
     let model_status_bg = Arc::clone(&model_status);
     tokio::spawn(async move {
         *model_status_bg.write().await = ModelStatus::Downloading { progress: 0.0 };
@@ -311,7 +318,7 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
             std::path::Path::new(&model_cache_dir),
             hf_token.as_deref(),
             &model_revision,
-            expected_hashes.as_ref(),
+            &expected_hashes,
             move |progress| {
                 if let Ok(mut status) = status_for_progress.try_write() {
                     *status = ModelStatus::Downloading { progress };

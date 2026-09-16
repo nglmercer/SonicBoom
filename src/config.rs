@@ -12,7 +12,17 @@ const REJECTED_PASSWORDS: &[&str] = &[
     "1234",
     "password",
     "admin",
+    "change-me",
     "changeme",
+    "change-me-to-a-strong-password",
+    "example-password",
+    "example_password",
+    "your-password",
+    "your_password",
+    "your-secure-password",
+    "your_secure_password",
+    "your_strong_password_12_plus_chars",
+    "default-password",
     "letmein",
     "qwerty",
     "sonicboom",
@@ -66,6 +76,8 @@ pub struct AppConfig {
     pub admin_session_expiry_secs: i64,
     // Directory for temporary TTS playback files.
     pub temp_audio_dir: String,
+    // Opt-in Strict-Transport-Security header (only for known-HTTPS deployments).
+    pub enable_hsts: bool,
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -100,8 +112,12 @@ impl AppConfig {
             token_store_path: env::var("TOKEN_STORE_PATH")
                 .unwrap_or_else(|_| "./tokens.json".to_string()),
             model_cache_dir: env::var("MODEL_CACHE_DIR").unwrap_or_else(|_| "./models".to_string()),
+            // Normalized to lowercase; validated as a 40-hex commit SHA.
             model_revision: env::var("MODEL_REVISION")
-                .unwrap_or_else(|_| DEFAULT_MODEL_REVISION.to_string()),
+                .ok()
+                .map(|v| v.trim().to_lowercase())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_MODEL_REVISION.to_string()),
             model_hashes_path: env::var("MODEL_SHA256_JSON_PATH").ok(),
             hf_token: env::var("HF_TOKEN").ok(),
             inference_steps: env_usize("INFERENCE_STEPS", 5),
@@ -154,6 +170,7 @@ impl AppConfig {
                 .unwrap_or(8 * 3600),
             temp_audio_dir: env::var("TEMP_AUDIO_DIR")
                 .unwrap_or_else(|_| "./temp_audio".to_string()),
+            enable_hsts: env_bool("ENABLE_HSTS", false),
         }
     }
 
@@ -193,8 +210,17 @@ impl AppConfig {
                 }
             }
         }
-        if self.model_revision.trim().is_empty() {
-            return Err("MODEL_REVISION must not be empty".to_string());
+        if !sonicboom::tts::download::is_valid_commit_sha(&self.model_revision) {
+            return Err(
+                "MODEL_REVISION must be a 40-character commit SHA (mutable names like 'main' are rejected)"
+                    .to_string(),
+            );
+        }
+        if self.model_revision != DEFAULT_MODEL_REVISION && self.model_hashes_path.is_none() {
+            return Err(
+                "custom MODEL_REVISION requires MODEL_SHA256_JSON_PATH with trusted hashes for that exact revision"
+                    .to_string(),
+            );
         }
         if self.tts_rate_limit_window_secs == 0 {
             return Err("TTS_RATE_LIMIT_WINDOW_SECS must be greater than 0".to_string());
@@ -229,7 +255,8 @@ impl AppConfig {
                     .to_string(),
             );
         }
-        if self.admin_pw.len() < MIN_ADMIN_PASSWORD_LEN {
+        // Length is measured in Unicode characters, matching the documented policy.
+        if self.admin_pw.chars().count() < MIN_ADMIN_PASSWORD_LEN {
             return Err(format!(
                 "SONICBOOM_ADMIN_PW must be at least {MIN_ADMIN_PASSWORD_LEN} characters"
             ));
@@ -285,6 +312,7 @@ mod tests {
             cookie_secure: false,
             admin_session_expiry_secs: 8 * 3600,
             temp_audio_dir: "./temp_audio".to_string(),
+            enable_hsts: false,
         }
     }
 
@@ -307,6 +335,70 @@ mod tests {
             config.admin_pw = pw.to_string();
             assert!(config.validate().is_err(), "password {pw:?} was accepted");
         }
+    }
+
+    #[test]
+    fn placeholder_passwords_fail_despite_length() {
+        for pw in [
+            "change-me-to-a-strong-password",
+            "CHANGE-ME-TO-A-STRONG-PASSWORD",
+            "example-password",
+            "example_password",
+            "your-secure-password",
+            "your_secure_password",
+            "your_strong_password_12_plus_chars",
+            "default-password",
+        ] {
+            let mut config = valid_config();
+            config.admin_pw = pw.to_string();
+            assert!(config.validate().is_err(), "password {pw:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn password_length_counts_unicode_characters() {
+        // 11 chars (multibyte) must fail the 12-character policy ...
+        let mut config = valid_config();
+        config.admin_pw = "pässwörd-ün".to_string();
+        assert_eq!(config.admin_pw.chars().count(), 11);
+        assert!(config.validate().is_err());
+        // ... while 12 Unicode chars pass.
+        let mut config = valid_config();
+        config.admin_pw = "pässwörd-üni".to_string();
+        assert_eq!(config.admin_pw.chars().count(), 12);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn model_revision_must_be_immutable_sha() {
+        for rev in [
+            "",
+            "main",
+            "master",
+            "latest",
+            "refs/heads/main",
+            "v3",
+            "abc123",
+            "3cadd1ee6394adea1bd021217a0e650ede09a32",
+            "3cadd1ee6394adea1bd021217a0e650ede09a323f",
+            "zcadd1ee6394adea1bd021217a0e650ede09a323",
+        ] {
+            let mut config = valid_config();
+            config.model_revision = rev.to_string();
+            assert!(config.validate().is_err(), "revision {rev:?} was accepted");
+        }
+        let mut config = valid_config();
+        config.model_revision = DEFAULT_MODEL_REVISION.to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn custom_revision_requires_custom_manifest() {
+        let mut config = valid_config();
+        config.model_revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        assert!(config.validate().is_err());
+        config.model_hashes_path = Some("/tmp/custom-manifest.json".to_string());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

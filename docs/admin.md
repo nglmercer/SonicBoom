@@ -88,6 +88,16 @@ All admin mutations (`POST /admin/tokens`,
 per-session CSRF token sent as a hidden form field. Requests with a missing
 or invalid token are rejected with `403`.
 
+Login CSRF is intentionally not implemented: the login form has no
+authenticated ambient authority to abuse, and session ID rotation plus
+IP-based lockout already mitigate fixation/brute-force attacks.
+
+### Cache Policy
+
+All admin responses (pages, token-creation results, auth redirects) carry
+`Cache-Control: no-store` (+ `Pragma: no-cache`), so browsers never persist
+authentication state or one-time token displays.
+
 ### Login Protection
 
 The admin panel includes brute-force protection with automatic expiry:

@@ -13,6 +13,10 @@
 #   docker build --target runtime -t sonicboom:cpu .
 #   docker build --target runtime-playback -t sonicboom:playback .
 #   docker build --target runtime-cuda -t sonicboom:cuda .
+#
+# STAGE ORDER IS LOAD-BEARING: `runtime` must remain the LAST stage so a
+# plain `docker build .` produces the headless CPU server. The CI
+# dockerfile-lint job fails if the final stage is anything else.
 
 # ============================================================================
 # Builder: headless CPU server (no ALSA / no local playback)
@@ -40,18 +44,21 @@ RUN cargo fetch --locked
 
 COPY src ./src
 COPY templates ./templates
+COPY static ./static
+COPY models.sha256.json ./models.sha256.json
 
 RUN cargo build --release --locked --no-default-features --features server
 
 # Stage the ONNX Runtime shared library (if dynamically linked) at a known
 # path for the runtime image. Fail the build if it is needed but missing.
-RUN set -e; \
+RUN set -eu; \
     mkdir -p /build/ort-dist; \
     if ldd /build/target/release/SonicBoom | grep -q libonnxruntime; then \
-      ORT_LIB="$(find /build/target/release/build /root/.cargo /usr/local/cargo -name 'libonnxruntime.so*' 2>/dev/null | sort | head -1)"; \
-      if [ -z "$ORT_LIB" ]; then echo "ERROR: libonnxruntime required by binary but not found in builder" >&2; exit 1; fi; \
-      echo "Staging $ORT_LIB"; \
-      cp "$ORT_LIB" /build/ort-dist/; \
+      matches="$(find /build/target/release/build /root/.cargo /usr/local/cargo -type f -name 'libonnxruntime.so*' 2>/dev/null | sort)"; \
+      count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)"; \
+      if [ "$count" -ne 1 ]; then echo "ERROR: expected exactly one ONNX Runtime library, found $count" >&2; printf '%s\n' "$matches" >&2; exit 1; fi; \
+      echo "Staging $matches"; \
+      cp "$matches" /build/ort-dist/; \
     else \
       echo "Binary does not dynamically link libonnxruntime; nothing to stage"; \
     fi
@@ -80,16 +87,19 @@ RUN cargo fetch --locked
 
 COPY src ./src
 COPY templates ./templates
+COPY static ./static
+COPY models.sha256.json ./models.sha256.json
 
 RUN cargo build --release --locked
 
-RUN set -e; \
+RUN set -eu; \
     mkdir -p /build/ort-dist; \
     if ldd /build/target/release/SonicBoom | grep -q libonnxruntime; then \
-      ORT_LIB="$(find /build/target/release/build /root/.cargo /usr/local/cargo -name 'libonnxruntime.so*' 2>/dev/null | sort | head -1)"; \
-      if [ -z "$ORT_LIB" ]; then echo "ERROR: libonnxruntime required by binary but not found in builder" >&2; exit 1; fi; \
-      echo "Staging $ORT_LIB"; \
-      cp "$ORT_LIB" /build/ort-dist/; \
+      matches="$(find /build/target/release/build /root/.cargo /usr/local/cargo -type f -name 'libonnxruntime.so*' 2>/dev/null | sort)"; \
+      count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)"; \
+      if [ "$count" -ne 1 ]; then echo "ERROR: expected exactly one ONNX Runtime library, found $count" >&2; printf '%s\n' "$matches" >&2; exit 1; fi; \
+      echo "Staging $matches"; \
+      cp "$matches" /build/ort-dist/; \
     else \
       echo "Binary does not dynamically link libonnxruntime; nothing to stage"; \
     fi
@@ -122,17 +132,20 @@ RUN cargo fetch --locked
 
 COPY src ./src
 COPY templates ./templates
+COPY static ./static
+COPY models.sha256.json ./models.sha256.json
 
 # The `cuda` feature enables the ONNX Runtime CUDA execution provider.
 RUN cargo build --release --locked --no-default-features --features server,cuda
 
-RUN set -e; \
+RUN set -eu; \
     mkdir -p /build/ort-dist; \
     if ldd /build/target/release/SonicBoom | grep -q libonnxruntime; then \
-      ORT_LIBS="$(find /build/target/release/build /root/.cargo /usr/local/cargo -name 'libonnxruntime.so*' 2>/dev/null | sort)"; \
-      if [ -z "$ORT_LIBS" ]; then echo "ERROR: libonnxruntime required by binary but not found in builder" >&2; exit 1; fi; \
-      echo "Staging: $ORT_LIBS"; \
-      cp $ORT_LIBS /build/ort-dist/; \
+      matches="$(find /build/target/release/build /root/.cargo /usr/local/cargo -type f -name 'libonnxruntime.so*' 2>/dev/null | sort)"; \
+      count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)"; \
+      if [ "$count" -ne 1 ]; then echo "ERROR: expected exactly one ONNX Runtime library, found $count" >&2; printf '%s\n' "$matches" >&2; exit 1; fi; \
+      echo "Staging $matches"; \
+      cp "$matches" /build/ort-dist/; \
     else \
       echo "Binary does not dynamically link libonnxruntime; nothing to stage"; \
     fi
@@ -173,8 +186,10 @@ RUN set -e; \
     if ldd /app/sonicboom | grep -q libonnxruntime; then \
       if [ -z "$(ls -A /app/ort-lib/)" ]; then echo "ERROR: libonnxruntime required but not staged" >&2; exit 1; fi; \
     fi; \
-    if [ ! -f /app/ort-lib/libonnxruntime_providers_shared.so ]; then echo "ERROR: libonnxruntime_providers_shared.so missing from CUDA image" >&2; exit 1; fi; \
-    echo "Using staged ONNX Runtime: $(ls /app/ort-lib/)"
+    for prov in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do if [ ! -f "/app/ort-lib/$prov" ]; then echo "ERROR: $prov missing from CUDA image" >&2; exit 1; fi; done; \
+    echo "Using staged ONNX Runtime: $(ls /app/ort-lib/)"; \
+    if ldd /app/sonicboom | grep -q 'not found'; then echo "ERROR: unresolved shared-library dependency" >&2; ldd /app/sonicboom >&2; exit 1; fi; \
+    for prov in /app/ort-lib/*.so; do if ldd "$prov" | grep -q 'not found'; then echo "ERROR: unresolved provider dependency in $prov" >&2; ldd "$prov" >&2; exit 1; fi; done
 
 RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
     && chown -R sonicboom:sonicboom /app
@@ -219,7 +234,8 @@ RUN set -e; \
     if ldd /app/sonicboom | grep -q libonnxruntime; then \
       if [ -z "$(ls -A /app/ort-lib/)" ]; then echo "ERROR: libonnxruntime required but not staged" >&2; exit 1; fi; \
       echo "Using staged ONNX Runtime: $(ls /app/ort-lib/)"; \
-    fi
+    fi; \
+    if ldd /app/sonicboom | grep -q 'not found'; then echo "ERROR: unresolved shared-library dependency" >&2; ldd /app/sonicboom >&2; exit 1; fi
 
 RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
     && chown -R sonicboom:sonicboom /app
@@ -265,7 +281,8 @@ RUN set -e; \
     if ldd /app/sonicboom | grep -q libonnxruntime; then \
       if [ -z "$(ls -A /app/ort-lib/)" ]; then echo "ERROR: libonnxruntime required but not staged" >&2; exit 1; fi; \
       echo "Using staged ONNX Runtime: $(ls /app/ort-lib/)"; \
-    fi
+    fi; \
+    if ldd /app/sonicboom | grep -q 'not found'; then echo "ERROR: unresolved shared-library dependency" >&2; ldd /app/sonicboom >&2; exit 1; fi
 
 RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
     && chown -R sonicboom:sonicboom /app

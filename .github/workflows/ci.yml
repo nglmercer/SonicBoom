@@ -162,8 +162,8 @@ jobs:
           grep -q 'AS builder-cuda' Dockerfile
           grep -q -- '--features server,cuda' Dockerfile
           grep -q 'COPY --from=builder-cuda' Dockerfile
-          # Runtime stages must drop privileges.
-          grep -q 'USER sonicboom' Dockerfile
+          # All three runtime stages must drop privileges.
+          test "$(grep -c '^USER sonicboom' Dockerfile)" -eq 3
           # No silent-failure library copies.
           if grep -q '|| true' Dockerfile; then
             echo "ERROR: Dockerfile contains '|| true'" >&2
@@ -171,6 +171,24 @@ jobs:
           fi
           # Base images must be digest-pinned.
           test "$(grep -c '@sha256:' Dockerfile)" -ge 3
+          # ONNX Runtime selection must be deterministic: no first-match picks.
+          if grep -nE 'libonnxruntime.*(head|tail)' Dockerfile; then
+            echo "ERROR: ambiguous ONNX Runtime library selection" >&2
+            exit 1
+          fi
+          # No unquoted multi-file copies into the ORT staging dir.
+          if grep -nE 'cp \$[A-Z_]+ /build/ort-dist' Dockerfile; then
+            echo "ERROR: unquoted ORT staging copy" >&2
+            exit 1
+          fi
+          # CUDA runtime must verify both provider libraries.
+          grep -q 'libonnxruntime_providers_shared\.so' Dockerfile
+          grep -q 'libonnxruntime_providers_cuda\.so' Dockerfile
+          # Every runtime stage must fail on unresolved dynamic libraries.
+          test "$(grep -c "grep -q 'not found'" Dockerfile)" -ge 3
+          # The final stage must be the headless CPU runtime so a plain
+          # `docker build .` never produces a CUDA image by accident.
+          test "$(grep '^FROM .* AS ' Dockerfile | tail -1 | awk '{print $NF}')" = "runtime"
 
   supply-chain-guards:
     name: Supply-chain guards

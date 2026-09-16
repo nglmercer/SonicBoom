@@ -32,8 +32,10 @@ services:
       - SONICBOOM_ADMIN_PW=${SONICBOOM_ADMIN_PW:?Set SONICBOOM_ADMIN_PW in your environment or .env file}
       # Set to true only when terminating TLS at a reverse proxy in front.
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
-      # Uncomment to verify model files against a hashes manifest:
+      # Custom model trust (only needed with a custom MODEL_REVISION):
       # - MODEL_SHA256_JSON_PATH=/app/data/models.sha256.json
+      # Strict-Transport-Security (only when all traffic is known-HTTPS):
+      # - ENABLE_HSTS=true
     env_file:
       - path: .env
         required: false
