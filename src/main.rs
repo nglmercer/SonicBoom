@@ -1,5 +1,11 @@
-// Hide the console window on Windows (no-op on Linux/macOS)
-#![windows_subsystem = "windows"]
+// Hide the console window on Windows for release desktop (`gui`) builds
+// only (no-op on Linux/macOS). Headless server builds always keep the
+// console so startup errors and logs stay visible; debug `gui` builds keep
+// it too so `cargo run` output is visible during development.
+#![cfg_attr(
+    all(feature = "gui", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 mod admin;
 mod api;
@@ -158,9 +164,7 @@ fn ensure_gui_env() {
 
     // Set `name` only when currently unset or blank.
     let set_default = |name: &str, value: String| {
-        let missing = env::var(name)
-            .map(|v| v.trim().is_empty())
-            .unwrap_or(true);
+        let missing = env::var(name).map(|v| v.trim().is_empty()).unwrap_or(true);
         if missing {
             // Safe here: called on the main thread before any other threads
             // are spawned (`ensure_gui_env` runs first in `main`).
@@ -230,11 +234,7 @@ fn ensure_gui_env() {
 /// Insert or replace `key=value` in the `.env` file at `path`, creating it
 /// (and parents) as needed. Restricts permissions to `0600` on Unix.
 #[cfg(feature = "gui")]
-fn persist_env_value(
-    path: &std::path::Path,
-    key: &str,
-    value: &str,
-) -> std::io::Result<()> {
+fn persist_env_value(path: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
     if let Some(parent) = path.parent() {
@@ -339,9 +339,8 @@ fn probe_port(port: u16) -> PortProbe {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-        let req = format!(
-            "GET /health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-        );
+        let req =
+            format!("GET /health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
         if stream.write_all(req.as_bytes()).is_ok() {
             let mut buf = [0u8; 1024];
             let mut head = Vec::new();
