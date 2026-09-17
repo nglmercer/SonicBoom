@@ -50,8 +50,10 @@ and empty assignments are rejected.
 | `REQUEST_TIMEOUT_SECS` | `120` | Request timeout in seconds (1–3600) |
 | `MAX_CONCURRENT_INFERENCE` | `1` | Max simultaneous inferences (1–64) |
 | `MAX_PENDING_INFERENCE` | `8` | Max queued (waiting) inferences, overflow → `429` (0–10000) |
-| `TTS_RATE_LIMIT_REQUESTS` | `20` | Per-token requests per window for TTS endpoints, `0` disables (0–1000000) |
+| `TTS_RATE_LIMIT_REQUESTS` | `300` | Per-token sustained TTS requests per window, `0` disables (0–1000000) |
 | `TTS_RATE_LIMIT_WINDOW_SECS` | `60` | Rate-limit window in seconds (1–86400) |
+| `TTS_RATE_LIMIT_BURST` | _(= requests)_ | Per-token burst capacity: how many TTS requests may fire at once (1–1000000 when enabled) |
+| `AUDIO_OUTPUT_DEVICE` | `default` | Playback output selection: `default` follows the OS default, anything else names an explicit device (1–256 chars, no control chars; a missing device is retained + retried, never a startup crash) |
 | `TTS_MAX_BODY_BYTES` | `65536` | Body limit for `/api/tts*` (→ `413` when exceeded) (1024–16777216) |
 | `OPENAI_MAX_BODY_BYTES` | `65536` | Body limit for `/v1/audio/speech` (1024–16777216) |
 | `QUEUE_MAX_BODY_BYTES` | `16384` | Body limit for queue JSON (1024–16777216) |

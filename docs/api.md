@@ -6,6 +6,7 @@ Complete API documentation for SonicBoom TTS server.
 
 - [Original TTS API](#original-tts-api)
 - [Audio Queue API](#audio-queue-api)
+- [Audio Output Device API](#audio-output-device-api)
 - [Web Routes](#web-routes)
 - [Authentication](#authentication)
 - [Response Formats](#response-formats)
@@ -248,6 +249,119 @@ Retrieve information about current playback and the queue.
 
 ---
 
+## Audio Output Device API
+
+Playback builds can discover, report, and switch the server's audio
+output device at runtime — e.g. speakers, headphones, HDMI, VB-Audio
+cables, or loopback devices. HTTP clients cannot enumerate the host's
+devices themselves, so SonicBoom owns discovery. All three endpoints
+require Bearer [REDACTED] (device names are host metadata) and exist only
+when the `playback` feature is enabled (otherwise `404`). No paths or
+filesystem data are ever returned.
+
+### List Output Devices
+
+**Endpoint:** `GET /api/audio/devices`
+
+Output devices only (never input-only), with the logical `default` entry
+always first. A backend enumeration failure returns `500`, never an
+empty success.
+
+**Example Response:**
+
+```json
+{
+  "devices": [
+    {
+      "id": "default",
+      "name": "System Default",
+      "is_default": true,
+      "is_selected": false
+    },
+    {
+      "id": "Speakers (Realtek(R) Audio)",
+      "name": "Speakers (Realtek(R) Audio)",
+      "is_default": false,
+      "is_selected": true
+    }
+  ],
+  "selected": "Speakers (Realtek(R) Audio)"
+}
+```
+
+Device ids are the OS-reported names (backend/OS dependent — CPAL
+exposes no stable identifiers). Duplicate names gain ` #2`, ` #3`, ...
+suffixes on `id`. `selected` is the configured selection, which may name
+a device that is currently missing (it then matches no entry).
+
+### Get Active Output Device
+
+**Endpoint:** `GET /api/audio/output`
+
+Distinguishes the configured selection from the live hardware state, so
+a temporarily missing device is visible instead of silently substituted.
+
+**Example Response:**
+
+```json
+{
+  "device": "CABLE Input (VB-Audio Virtual Cable)",
+  "resolved_name": "CABLE Input (VB-Audio Virtual Cable)",
+  "available": true
+}
+```
+
+While the selection is unavailable (missing device, no stream yet),
+`available` is `false` and `resolved_name` is `null` — the `device`
+selection itself is retained.
+
+### Set Output Device
+
+**Endpoint:** `POST /api/audio/output`
+
+**Request Body (JSON):** `{ "device": "<id or \"default\">" }`
+
+`{"device": "default"}` returns to OS-default behavior. Unknown devices
+return `400` with no fallback to another device.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:17842/api/audio/output \
+  -H "Authorization: Bearer [REDACTED]" \
+  -H "Content-Type: application/json" \
+  -d '{"device": "CABLE Input (VB-Audio Virtual Cable)"}'
+```
+
+**Example Response:**
+
+```json
+{
+  "success": true,
+  "device": "CABLE Input (VB-Audio Virtual Cable)",
+  "resolved_name": "CABLE Input (VB-Audio Virtual Cable)"
+}
+```
+
+**Switching behavior:** the target is validated against live enumeration
+and the new stream is opened before anything is committed — a failed
+switch leaves the previous working output active. On success the current
+item stops (its temp file is cleaned) and queued items continue on the
+new device; the waiting queue is never cleared by a switch. Switching
+while paused keeps the queue for `Resume`.
+
+**Disconnect behavior:** a selected device that disappears does not
+crash the playback thread and is never auto-switched to another output.
+The selection is retained, pending items stay queued, and playback
+resumes once the device reappears (immediate retry on commands, throttled
+background retry otherwise).
+
+**Persistence:** runtime selection is process-local and does not survive
+restarts (SonicBoom never rewrites `.env`). Set `AUDIO_OUTPUT_DEVICE`
+for the startup selection.
+
+---
+
 ## Web Routes
 
 ### Health Check
@@ -397,7 +511,7 @@ curl -X POST http://localhost:17842/v1/audio/speech \
 | `404`       | Not found                                           |
 | `413`       | Payload too large (body limit exceeded)             |
 | `422`       | Unprocessable entity                                |
-| `429`       | Too many requests (rate limit / inference saturated)|
+| `429`       | Too many requests (rate limit / inference saturated / playback queue full)|
 | `500`       | Internal server error (generic message + `request_id`) |
 | `503`       | Service unavailable (model loading)                 |
 
@@ -410,9 +524,36 @@ secrets. Use `request_id` to correlate with server logs.
 ## Rate Limiting
 
 Expensive TTS endpoints (`POST /api/tts`, `POST /api/tts/play`,
-`POST /v1/audio/speech`) are rate-limited per API token
-(`TTS_RATE_LIMIT_REQUESTS` per `TTS_RATE_LIMIT_WINDOW_SECS`, default
-20/min; exceeded → `429`).
+`POST /v1/audio/speech`) are rate-limited per API token with a
+burst-friendly token bucket: `TTS_RATE_LIMIT_REQUESTS` per
+`TTS_RATE_LIMIT_WINDOW_SECS` is the sustained refill rate (default
+300/min) and `TTS_RATE_LIMIT_BURST` is the bucket capacity for event
+bursts (defaults to the request budget). Set
+`TTS_RATE_LIMIT_REQUESTS=0` to disable limiting (not recommended).
+
+Exceeded budgets return `429` with live retry metadata computed from the
+actual bucket state:
+
+```http
+Retry-After: 12
+X-RateLimit-Limit: 300
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 48
+```
+
+`Retry-After` is seconds until one request is affordable;
+`X-RateLimit-Reset` is seconds until the bucket refills completely. The
+JSON body keeps the stable `AppError` shape (`error:
+"too_many_requests"`).
+
+SonicBoom returns `429` from three independent protections — never merge
+them when debugging:
+
+| Source | Message | Headers |
+| ------ | ------- | ------- |
+| Token bucket (`RateLimiter`) | `Rate limit exceeded. Try again later.` | `Retry-After` + `X-RateLimit-*` |
+| Inference admission (`InferenceGate`) | `Server is busy. Too many pending inference requests.` | none |
+| Playback queue bound (`AudioQueue`) | `Playback queue is full. Try again later.` | none |
 
 Inference itself is concurrency-bounded (`MAX_CONCURRENT_INFERENCE`,
 `MAX_PENDING_INFERENCE`); saturated requests are rejected with `429`

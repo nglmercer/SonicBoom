@@ -1,4 +1,6 @@
 pub mod audio;
+#[cfg(feature = "playback")]
+pub mod devices;
 pub mod download;
 pub mod inference;
 pub mod model;

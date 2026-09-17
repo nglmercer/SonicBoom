@@ -114,13 +114,25 @@ pub async fn get_status(State(state): State<crate::AppState>) -> impl IntoRespon
 }
 
 /// Shared pre-inference pipeline: rate limit -> validate -> admission control.
-fn check_rate_limit(state: &crate::AppState, token: &AuthenticatedToken) -> Result<(), AppError> {
-    if !state.rate_limiter.allow(&token.rate_limit_key()) {
-        return Err(AppError::TooManyRequests(
-            "Rate limit exceeded. Try again later.".to_string(),
-        ));
+///
+/// Token-bucket rejections become [`AppError::RateLimited`] (same `429` JSON
+/// shape plus live `Retry-After` / `X-RateLimit-*` headers); inference and
+/// playback saturation keep their own headerless `429` messages.
+pub(super) fn check_rate_limit(
+    state: &crate::AppState,
+    token: &AuthenticatedToken,
+) -> Result<(), AppError> {
+    let decision = state.rate_limiter.check(&token.rate_limit_key());
+    if decision.allowed {
+        return Ok(());
     }
-    Ok(())
+    Err(AppError::RateLimited {
+        message: "Rate limit exceeded. Try again later.".to_string(),
+        retry_after_secs: decision.retry_after_secs,
+        limit: decision.limit,
+        remaining: decision.remaining,
+        reset_secs: decision.reset_secs,
+    })
 }
 
 pub async fn post_tts(
@@ -279,23 +291,49 @@ pub async fn post_tts_and_play(
     // Enqueue first; register for cleanup only after the queue accepted
     // the item, so a rejection cannot orphan the file. Every failure path
     // below deletes the newly generated file.
+    use crate::tts::queue::AudioManagerError;
     let queued = if play_now {
+        // Acknowledged start: `Ok` means playback is audible, anything else
+        // maps to a precise status — never "Playing immediately" on failure.
         audio_manager
             .play_now(id.clone(), path.clone())
             .await
-            .map_err(|_| {
-                AppError::ServiceUnavailable("Audio playback system unavailable.".to_string())
+            .map_err(|e| match e {
+                AudioManagerError::Unavailable => {
+                    AppError::ServiceUnavailable("Audio playback system unavailable.".to_string())
+                }
+                AudioManagerError::OutputUnavailable => {
+                    AppError::ServiceUnavailable("Audio output unavailable.".to_string())
+                }
+                // The WAV was just synthesized by this server: undecodable
+                // output is a server bug, never a client error.
+                AudioManagerError::InvalidAudio => {
+                    AppError::internal("synthesized playback audio undecodable")
+                }
+                AudioManagerError::QueueFull
+                | AudioManagerError::UnknownDevice
+                | AudioManagerError::DeviceError => {
+                    AppError::internal(format!("unexpected play_now failure: {e}"))
+                }
             })
     } else {
         audio_manager
             .add_to_queue(id.clone(), path.clone())
             .await
             .map_err(|e| match e {
-                crate::tts::queue::AudioManagerError::QueueFull => AppError::TooManyRequests(
+                AudioManagerError::QueueFull => AppError::TooManyRequests(
                     "Playback queue is full. Try again later.".to_string(),
                 ),
-                crate::tts::queue::AudioManagerError::Unavailable => {
+                AudioManagerError::Unavailable => {
                     AppError::ServiceUnavailable("Audio playback system unavailable.".to_string())
+                }
+                AudioManagerError::OutputUnavailable => {
+                    AppError::ServiceUnavailable("Audio output unavailable.".to_string())
+                }
+                AudioManagerError::InvalidAudio
+                | AudioManagerError::UnknownDevice
+                | AudioManagerError::DeviceError => {
+                    AppError::internal(format!("unexpected enqueue failure: {e}"))
                 }
             })
     };

@@ -199,6 +199,8 @@ mod tests {
             max_chunk_chars: 10,
             tts_rate_limit_requests: 1,
             tts_rate_limit_window_secs: 1,
+            tts_rate_limit_burst: 1,
+            audio_output_device: "default".to_string(),
             tts_max_body_bytes: 1024,
             openai_max_body_bytes: 1024,
             queue_max_body_bytes: 1024,

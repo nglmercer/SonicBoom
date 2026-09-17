@@ -12,7 +12,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::tts::synthesize_bounded;
+use super::tts::{check_rate_limit, synthesize_bounded};
 use crate::{
     auth::AuthenticatedToken,
     error::AppError,
@@ -129,11 +129,7 @@ pub async fn post_speech(
     State(state): State<crate::AppState>,
     body: String,
 ) -> Result<impl IntoResponse, AppError> {
-    if !state.rate_limiter.allow(&token.rate_limit_key()) {
-        return Err(AppError::TooManyRequests(
-            "Rate limit exceeded. Try again later.".to_string(),
-        ));
-    }
+    check_rate_limit(&state, &token)?;
 
     let request: SpeechRequest = serde_json::from_str(&body)
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON in request body: {e}")))?;

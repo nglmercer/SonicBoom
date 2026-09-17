@@ -72,7 +72,10 @@ pub fn validate_volume(volume: f32) -> Result<f32, &'static str> {
 }
 
 /// Map a playback-subsystem failure to a stable API response: a dead audio
-/// thread is `503`, a full queue is `429`.
+/// thread or missing output is `503`, a full queue is `429`, an undecodable
+/// caller-owned file is `422`. The `503` messages distinguish a dead thread
+/// (`Audio playback system unavailable.`) from a live thread with no output
+/// (`Audio output unavailable.`).
 fn audio_error_response(error: AudioManagerError) -> (StatusCode, Json<QueueResponse>) {
     match error {
         AudioManagerError::QueueFull => failure(
@@ -82,6 +85,22 @@ fn audio_error_response(error: AudioManagerError) -> (StatusCode, Json<QueueResp
         AudioManagerError::Unavailable => failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "Audio playback system unavailable.",
+        ),
+        AudioManagerError::OutputUnavailable => {
+            failure(StatusCode::SERVICE_UNAVAILABLE, "Audio output unavailable.")
+        }
+        AudioManagerError::InvalidAudio => failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Audio file is invalid or undecodable.",
+        ),
+        // Defensive: queue operations never produce device errors, but the
+        // mapping stays total so new callers cannot panic the match.
+        AudioManagerError::UnknownDevice => {
+            failure(StatusCode::BAD_REQUEST, "Unknown audio output device.")
+        }
+        AudioManagerError::DeviceError => failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Audio device enumeration failed.",
         ),
     }
 }
@@ -559,5 +578,15 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         let (status, _) = audio_error_response(AudioManagerError::Unavailable);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // Missing output is 503 like a dead thread, undecodable caller
+        // files are 422 — never a blind success.
+        let (status, _) = audio_error_response(AudioManagerError::OutputUnavailable);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let (status, _) = audio_error_response(AudioManagerError::InvalidAudio);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = audio_error_response(AudioManagerError::UnknownDevice);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = audio_error_response(AudioManagerError::DeviceError);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

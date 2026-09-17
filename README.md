@@ -75,6 +75,7 @@ The server will:
 - **Admin Panel** - Web-based management interface
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI TTS
 - **Audio Queue System** - Play audio files directly on the server with queue management
+- **Output Device Selection** - Discover and switch server audio outputs (speakers, HDMI, virtual cables) via API
 - **Session Management** - Secure admin sessions with lockout protection
 - **Desktop Tray (optional)** - System tray GUI via the `gui` feature (macOS/Windows/Linux; Linux uses StatusNotifierItem over D-Bus, no GTK build dependencies)
 
@@ -101,6 +102,14 @@ The server will:
 | `POST` | `/api/queue/stop`   | Stop playback and clear queue |
 | `POST` | `/api/queue/volume` | Set playback volume           |
 | `GET`  | `/api/queue/status` | Get current queue status      |
+
+### Audio Output Device API (playback builds)
+
+| Method | Endpoint            | Description                        |
+| ------ | ------------------- | ---------------------------------- |
+| `GET`  | `/api/audio/devices`| List output devices + selection    |
+| `GET`  | `/api/audio/output` | Get active output device           |
+| `POST` | `/api/audio/output` | Switch output device at runtime    |
 
 ### OpenAI-Compatible API
 
@@ -184,7 +193,8 @@ SonicBoom/
 │   ├── api/                 # API handlers
 │   │   ├── tts.rs           # Original TTS API
 │   │   ├── openai.rs        # OpenAI-compatible API
-│   │   └── queue.rs         # Audio queue API
+│   │   ├── queue.rs         # Audio queue API
+│   │   └── audio.rs         # Output device API
 │   ├── auth/                # Authentication
 │   │   ├── store.rs         # Token storage
 │   │   └── token.rs         # Token types/validation
@@ -194,6 +204,7 @@ SonicBoom/
 │   │   ├── inference.rs     # ONNX inference
 │   │   ├── model.rs         # Model loading
 │   │   ├── queue.rs         # Server-side playback queue
+│   │   ├── devices.rs       # Output device discovery
 │   │   └── text.rs          # Text normalization
 │   └── web/                 # Web frontend
 │       └── index.rs         # Home page

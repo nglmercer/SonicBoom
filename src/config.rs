@@ -14,6 +14,15 @@ pub const DEFAULT_MAX_PLAYBACK_QUEUE_ITEMS: usize = 100;
 pub const DEFAULT_MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// Default total timeout per model file download.
 pub const DEFAULT_MODEL_DOWNLOAD_TIMEOUT_SECS: u64 = 1800;
+/// Default per-token TTS request budget: 300 requests per 60s window.
+/// Sized for high-frequency event-driven workloads (chat, gifts, automation);
+/// sustained abuse is still bounded by the token-bucket refill rate.
+pub const DEFAULT_TTS_RATE_LIMIT_REQUESTS: u32 = 300;
+pub const DEFAULT_TTS_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+/// Default audio output selection: follow the OS default output device.
+pub const DEFAULT_AUDIO_OUTPUT_DEVICE: &str = "default";
+/// Maximum audio output device selection length (Unicode characters).
+pub const MAX_AUDIO_OUTPUT_DEVICE_LEN: usize = 256;
 
 /// Upper bounds that keep operator input from overflowing internal
 /// synchronization primitives or requesting absurd allocations.
@@ -111,9 +120,15 @@ pub struct AppConfig {
     pub max_pending_inference: usize,
     // Text chunking (Unicode characters, hard maximum per chunk)
     pub max_chunk_chars: usize,
-    // Rate limiting for expensive TTS endpoints (per token, sliding window)
+    // Rate limiting for expensive TTS endpoints (per token, token bucket:
+    // `tts_rate_limit_requests` per window is the sustained refill rate and
+    // `tts_rate_limit_burst` is the bucket capacity for event bursts).
     pub tts_rate_limit_requests: u32,
     pub tts_rate_limit_window_secs: u64,
+    pub tts_rate_limit_burst: u32,
+    // Audio output device selection (`default` follows the OS default output;
+    // any other value names an explicit output device). Only used with playback.
+    pub audio_output_device: String,
     // HTTP body limits (bytes, enforced before full allocation)
     pub tts_max_body_bytes: usize,
     pub openai_max_body_bytes: usize,
@@ -220,7 +235,36 @@ impl AppConfig {
     }
 
     fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        // Burst defaults to the sustained budget so existing deployments keep
+        // a single knob; `0` (limiter disabled) falls back to the default
+        // burst since the value is unused but still validated.
+        let tts_rate_limit_requests: u32 = env_parse(
+            &get,
+            "TTS_RATE_LIMIT_REQUESTS",
+            DEFAULT_TTS_RATE_LIMIT_REQUESTS,
+        )?;
+        let tts_rate_limit_window_secs: u64 = env_u64(
+            &get,
+            "TTS_RATE_LIMIT_WINDOW_SECS",
+            DEFAULT_TTS_RATE_LIMIT_WINDOW_SECS,
+        )?;
+        let default_burst = if tts_rate_limit_requests == 0 {
+            DEFAULT_TTS_RATE_LIMIT_REQUESTS
+        } else {
+            tts_rate_limit_requests
+        };
+        let tts_rate_limit_burst: u32 = env_parse(&get, "TTS_RATE_LIMIT_BURST", default_burst)?;
+        // Unset or blank selects the OS default output; anything else names
+        // an explicit device (validated for length/control characters below).
+        let audio_output_device = get("AUDIO_OUTPUT_DEVICE")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_AUDIO_OUTPUT_DEVICE.to_string());
         Ok(Self {
+            tts_rate_limit_requests,
+            tts_rate_limit_window_secs,
+            tts_rate_limit_burst,
+            audio_output_device,
             admin_id: get("SONICBOOM_ADMIN_ID").unwrap_or_else(|| "admin".to_string()),
             // No default password: missing/weak values fail validation.
             admin_pw: get("SONICBOOM_ADMIN_PW").unwrap_or_default(),
@@ -253,8 +297,6 @@ impl AppConfig {
             max_concurrent_inference: env_usize(&get, "MAX_CONCURRENT_INFERENCE", 1)?,
             max_pending_inference: env_usize(&get, "MAX_PENDING_INFERENCE", 8)?,
             max_chunk_chars: env_usize(&get, "MAX_CHUNK_CHARS", 200)?,
-            tts_rate_limit_requests: env_parse(&get, "TTS_RATE_LIMIT_REQUESTS", 20)?,
-            tts_rate_limit_window_secs: env_u64(&get, "TTS_RATE_LIMIT_WINDOW_SECS", 60)?,
             tts_max_body_bytes: env_usize(&get, "TTS_MAX_BODY_BYTES", 65_536)?,
             openai_max_body_bytes: env_usize(&get, "OPENAI_MAX_BODY_BYTES", 65_536)?,
             queue_max_body_bytes: env_usize(&get, "QUEUE_MAX_BODY_BYTES", 16_384)?,
@@ -368,6 +410,25 @@ impl AppConfig {
                 "TTS_RATE_LIMIT_WINDOW_SECS must be between 1 and {MAX_RATE_LIMIT_WINDOW_SECS}"
             ));
         }
+        if self.tts_rate_limit_burst > MAX_RATE_LIMIT_REQUESTS {
+            return Err(format!(
+                "TTS_RATE_LIMIT_BURST must be between 0 and {MAX_RATE_LIMIT_REQUESTS}"
+            ));
+        }
+        if self.tts_rate_limit_requests > 0 && self.tts_rate_limit_burst == 0 {
+            return Err(format!(
+                "TTS_RATE_LIMIT_BURST must be between 1 and {MAX_RATE_LIMIT_REQUESTS} when rate limiting is enabled"
+            ));
+        }
+        let device_len = self.audio_output_device.chars().count();
+        if device_len == 0 || device_len > MAX_AUDIO_OUTPUT_DEVICE_LEN {
+            return Err(format!(
+                "AUDIO_OUTPUT_DEVICE must be between 1 and {MAX_AUDIO_OUTPUT_DEVICE_LEN} characters"
+            ));
+        }
+        if self.audio_output_device.chars().any(|c| c.is_control()) {
+            return Err("AUDIO_OUTPUT_DEVICE must not contain control characters".to_string());
+        }
         if !(MIN_ADMIN_SESSION_EXPIRY_SECS..=MAX_ADMIN_SESSION_EXPIRY_SECS)
             .contains(&self.admin_session_expiry_secs)
         {
@@ -480,8 +541,10 @@ mod tests {
             max_concurrent_inference: 1,
             max_pending_inference: 8,
             max_chunk_chars: 200,
-            tts_rate_limit_requests: 20,
-            tts_rate_limit_window_secs: 60,
+            tts_rate_limit_requests: DEFAULT_TTS_RATE_LIMIT_REQUESTS,
+            tts_rate_limit_window_secs: DEFAULT_TTS_RATE_LIMIT_WINDOW_SECS,
+            tts_rate_limit_burst: DEFAULT_TTS_RATE_LIMIT_REQUESTS,
+            audio_output_device: DEFAULT_AUDIO_OUTPUT_DEVICE.to_string(),
             tts_max_body_bytes: 65_536,
             openai_max_body_bytes: 65_536,
             queue_max_body_bytes: 16_384,
@@ -659,6 +722,7 @@ mod tests {
             ("MAX_CHUNK_CHARS", ""),
             ("TTS_RATE_LIMIT_REQUESTS", "unlimited"),
             ("TTS_RATE_LIMIT_WINDOW_SECS", "minute"),
+            ("TTS_RATE_LIMIT_BURST", "many"),
             ("TTS_MAX_BODY_BYTES", "64k"),
             ("OPENAI_MAX_BODY_BYTES", "64k"),
             ("QUEUE_MAX_BODY_BYTES", "16k"),
@@ -798,5 +862,99 @@ mod tests {
         config.max_pending_inference = MAX_PENDING_INFERENCE_LIMIT;
         config.max_playback_queue_items = MAX_PLAYBACK_QUEUE_ITEMS_LIMIT;
         assert!(config.validate().is_ok());
+    }
+
+    /// Fill the credentials a parsed config cannot provide so `validate()`
+    /// can prove the parsed values themselves are acceptable.
+    fn with_valid_secrets(mut config: AppConfig) -> AppConfig {
+        config.admin_pw = "correct-horse-battery-staple".to_string();
+        #[cfg(feature = "playback")]
+        {
+            config.allowed_audio_dir = Some("./audio".to_string());
+        }
+        config
+    }
+
+    #[test]
+    fn rate_limit_defaults_to_burst_friendly_300_per_minute() {
+        let config = config_from(&[]).expect("empty env uses defaults");
+        assert_eq!(
+            config.tts_rate_limit_requests,
+            DEFAULT_TTS_RATE_LIMIT_REQUESTS
+        );
+        assert_eq!(config.tts_rate_limit_requests, 300);
+        assert_eq!(
+            config.tts_rate_limit_window_secs,
+            DEFAULT_TTS_RATE_LIMIT_WINDOW_SECS
+        );
+        assert_eq!(config.tts_rate_limit_window_secs, 60);
+        // Burst derives from the sustained budget when omitted.
+        assert_eq!(config.tts_rate_limit_burst, 300);
+        assert!(with_valid_secrets(config).validate().is_ok());
+    }
+
+    #[test]
+    fn burst_derives_from_custom_request_budget() {
+        let config = config_from(&[("TTS_RATE_LIMIT_REQUESTS", "500")]).unwrap();
+        assert_eq!(config.tts_rate_limit_requests, 500);
+        assert_eq!(config.tts_rate_limit_burst, 500);
+        assert!(with_valid_secrets(config).validate().is_ok());
+    }
+
+    #[test]
+    fn explicit_burst_overrides_derived_default() {
+        let config = config_from(&[
+            ("TTS_RATE_LIMIT_REQUESTS", "300"),
+            ("TTS_RATE_LIMIT_BURST", "50"),
+        ])
+        .unwrap();
+        assert_eq!(config.tts_rate_limit_burst, 50);
+        assert!(with_valid_secrets(config).validate().is_ok());
+    }
+
+    #[test]
+    fn zero_requests_disables_limiting_with_valid_burst() {
+        let config = config_from(&[("TTS_RATE_LIMIT_REQUESTS", "0")]).unwrap();
+        assert_eq!(config.tts_rate_limit_requests, 0);
+        assert!(with_valid_secrets(config).validate().is_ok());
+    }
+
+    #[test]
+    fn zero_burst_fails_while_limiting_is_enabled() {
+        let mut config = valid_config();
+        config.tts_rate_limit_requests = 300;
+        config.tts_rate_limit_burst = 0;
+        assert!(config.validate().is_err());
+        // ... but is harmless when the limiter is disabled.
+        let mut config = valid_config();
+        config.tts_rate_limit_requests = 0;
+        config.tts_rate_limit_burst = 0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn audio_output_device_defaults_to_os_default() {
+        let config = config_from(&[]).expect("empty env uses defaults");
+        assert_eq!(config.audio_output_device, "default");
+        // Blank assignments also select the OS default.
+        let config = config_from(&[("AUDIO_OUTPUT_DEVICE", "   ")]).unwrap();
+        assert_eq!(config.audio_output_device, "default");
+        // Explicit names are trimmed and preserved.
+        let config = config_from(&[("AUDIO_OUTPUT_DEVICE", "  Speakers (USB)  ")]).unwrap();
+        assert_eq!(config.audio_output_device, "Speakers (USB)");
+        assert!(with_valid_secrets(config).validate().is_ok());
+    }
+
+    #[test]
+    fn audio_output_device_rejects_syntax_errors() {
+        let mut config = valid_config();
+        config.audio_output_device.clear();
+        assert!(config.validate().is_err());
+        let mut config = valid_config();
+        config.audio_output_device = "x".repeat(MAX_AUDIO_OUTPUT_DEVICE_LEN + 1);
+        assert!(config.validate().is_err());
+        let mut config = valid_config();
+        config.audio_output_device = "bad\ndevice".to_string();
+        assert!(config.validate().is_err());
     }
 }

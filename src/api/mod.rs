@@ -1,3 +1,5 @@
+#[cfg(feature = "playback")]
+pub mod audio;
 pub mod gate;
 pub mod openai;
 #[cfg(feature = "playback")]
@@ -55,7 +57,15 @@ pub fn router(state: AppState) -> Router {
                 "/api/queue/volume",
                 post(queue::set_volume).route_layer(DefaultBodyLimit::max(queue_body_limit)),
             )
-            .route("/api/queue/status", get(queue::get_queue_status));
+            .route("/api/queue/status", get(queue::get_queue_status))
+            // Audio output device discovery/selection (playback only).
+            .route("/api/audio/devices", get(audio::list_output_devices))
+            .route(
+                "/api/audio/output",
+                get(audio::get_output_device)
+                    .post(audio::set_output_device)
+                    .route_layer(DefaultBodyLimit::max(queue_body_limit)),
+            );
     }
 
     router.with_state(state)
@@ -100,6 +110,8 @@ mod tests {
             max_chunk_chars: 200,
             tts_rate_limit_requests: 0, // disabled for auth tests
             tts_rate_limit_window_secs: 60,
+            tts_rate_limit_burst: 300,
+            audio_output_device: "default".to_string(),
             tts_max_body_bytes: 65_536,
             openai_max_body_bytes: 65_536,
             queue_max_body_bytes: 16_384,
@@ -143,6 +155,52 @@ mod tests {
         }
         let request = builder.body(Body::from(body.to_string())).unwrap();
         app.oneshot(request).await.unwrap().status()
+    }
+
+    #[cfg(feature = "playback")]
+    async fn audio_test_parts() -> (
+        Router,
+        String,
+        tokio::sync::mpsc::Receiver<crate::tts::queue::AudioCommand>,
+    ) {
+        let path = std::env::temp_dir().join(format!(
+            "sonicboom-audio-test-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = TokenStore::load(path.to_str().unwrap()).await.unwrap();
+        let (_token, raw) = store.create(None).await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let manager = crate::tts::queue::AudioManager::for_test(tx);
+        let state = AppState {
+            model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
+            token_store: Arc::new(store),
+            config: Arc::new(test_config()),
+            audio_manager: Arc::new(Some(manager)),
+            inference_gate: Arc::new(gate::InferenceGate::new(1, 8)),
+            rate_limiter: Arc::new(rate_limit::RateLimiter::new(0, 60)),
+        };
+        let _ = std::fs::remove_file(&path);
+        (router(state), raw, rx)
+    }
+
+    #[cfg(feature = "playback")]
+    fn authed(uri: &str, raw: &str, method: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {raw}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[cfg(feature = "playback")]
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     #[tokio::test]
@@ -261,6 +319,7 @@ mod tests {
             ("POST", "/api/queue/resume", ""),
             ("POST", "/api/queue/stop", ""),
             ("POST", "/api/queue/volume", r#"{"volume":0.5}"#),
+            ("POST", "/api/audio/output", r#"{"device":"default"}"#),
         ] {
             let (app, _) = test_app().await;
             let request = Request::builder()
@@ -276,14 +335,276 @@ mod tests {
             );
         }
 
-        let (app, _) = test_app().await;
-        let request = Request::get("/api/queue/status")
-            .body(Body::empty())
+        for uri in [
+            "/api/queue/status",
+            "/api/audio/devices",
+            "/api/audio/output",
+        ] {
+            let (app, _) = test_app().await;
+            let request = Request::get(uri).body(Body::empty()).unwrap();
+            assert_eq!(
+                app.oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED,
+                "GET {uri} must require authentication"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "playback"))]
+    #[tokio::test]
+    async fn audio_routes_are_absent_without_playback() {
+        for (method, uri) in [
+            ("GET", "/api/audio/devices"),
+            ("GET", "/api/audio/output"),
+            ("POST", "/api/audio/output"),
+        ] {
+            let (app, valid) = test_app().await;
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {valid}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"device":"default"}"#))
+                .unwrap();
+            assert_eq!(
+                app.oneshot(request).await.unwrap().status(),
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must not exist without the playback feature"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limited_tts_carries_retry_headers() {
+        // Tiny bucket: 2 requests, then the 3rd is a 429 with live metadata.
+        // The model stays Idle so allowed requests pass the limiter and then
+        // fail at the model check (503), proving limiter-before-model order.
+        let path = std::env::temp_dir().join(format!(
+            "sonicboom-ratelimit-test-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = TokenStore::load(path.to_str().unwrap()).await.unwrap();
+        let (_token, raw) = store.create(None).await.unwrap();
+        let mut config = test_config();
+        config.tts_rate_limit_requests = 2;
+        let state = AppState {
+            model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
+            token_store: Arc::new(store),
+            config: Arc::new(config),
+            audio_manager: Arc::new(None),
+            inference_gate: Arc::new(gate::InferenceGate::new(1, 8)),
+            rate_limiter: Arc::new(rate_limit::RateLimiter::new(2, 60)),
+        };
+        let _ = std::fs::remove_file(&path);
+        let app = router(state);
+
+        for _ in 0..2 {
+            assert_eq!(
+                post_status(app.clone(), "/api/tts", Some(&raw), "hello").await,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+        let request = Request::post("/api/tts")
+            .header("authorization", format!("Bearer {raw}"))
+            .body(Body::from("hello"))
             .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED,
-            "GET /api/queue/status must require authentication"
-        );
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let headers = response.headers();
+        assert_eq!(headers.get("retry-after").unwrap(), "30");
+        assert_eq!(headers.get("x-ratelimit-limit").unwrap(), "2");
+        assert_eq!(headers.get("x-ratelimit-remaining").unwrap(), "0");
+        assert!(headers.get("x-ratelimit-reset").is_some());
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "too_many_requests");
+        assert_eq!(body["status"], 429);
+    }
+
+    #[cfg(feature = "playback")]
+    #[tokio::test]
+    async fn audio_devices_reports_list_and_selection() {
+        use crate::tts::devices::{OutputDeviceInfo, OutputDeviceList};
+        use crate::tts::queue::AudioCommand;
+
+        let (app, valid, mut rx) = audio_test_parts().await;
+        tokio::spawn(async move {
+            match rx.recv().await {
+                Some(AudioCommand::GetOutputDevices { reply }) => {
+                    let _ = reply.send(Ok(OutputDeviceList {
+                        devices: vec![
+                            OutputDeviceInfo {
+                                id: "default".to_string(),
+                                name: "System Default".to_string(),
+                                is_default: true,
+                                is_selected: false,
+                            },
+                            OutputDeviceInfo {
+                                id: "Speakers".to_string(),
+                                name: "Speakers".to_string(),
+                                is_default: false,
+                                is_selected: true,
+                            },
+                        ],
+                        selected: "Speakers".to_string(),
+                    }));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        });
+        let response = app
+            .oneshot(authed("/api/audio/devices", &valid, "GET", ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["selected"], "Speakers");
+        assert_eq!(body["devices"][0]["id"], "default");
+        assert_eq!(body["devices"][1]["id"], "Speakers");
+        assert_eq!(body["devices"][1]["name"], "Speakers");
+    }
+
+    #[cfg(feature = "playback")]
+    #[tokio::test]
+    async fn audio_devices_enumeration_failure_is_500_not_empty_success() {
+        use crate::tts::queue::{AudioCommand, AudioManagerError};
+
+        let (app, valid, mut rx) = audio_test_parts().await;
+        tokio::spawn(async move {
+            if let Some(AudioCommand::GetOutputDevices { reply }) = rx.recv().await {
+                let _ = reply.send(Err(AudioManagerError::DeviceError));
+            }
+        });
+        let response = app
+            .oneshot(authed("/api/audio/devices", &valid, "GET", ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[cfg(feature = "playback")]
+    #[tokio::test]
+    async fn audio_output_reports_configured_selection() {
+        use crate::tts::devices::ActiveOutputDevice;
+        use crate::tts::queue::AudioCommand;
+
+        let (app, valid, mut rx) = audio_test_parts().await;
+        tokio::spawn(async move {
+            if let Some(AudioCommand::GetOutputDevice { reply }) = rx.recv().await {
+                let _ = reply.send(ActiveOutputDevice {
+                    device: "CABLE Input".to_string(),
+                    resolved_name: Some("CABLE Input".to_string()),
+                    available: true,
+                });
+            }
+        });
+        let response = app
+            .oneshot(authed("/api/audio/output", &valid, "GET", ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["device"], "CABLE Input");
+        assert_eq!(body["resolved_name"], "CABLE Input");
+        assert_eq!(body["available"], true);
+    }
+
+    #[cfg(feature = "playback")]
+    #[tokio::test]
+    async fn audio_output_selection_success_and_unknown_rejected() {
+        use crate::tts::devices::ActiveOutputDevice;
+        use crate::tts::queue::{AudioCommand, AudioManagerError};
+
+        // Successful switch commits and reports the resolved device.
+        let (app, valid, mut rx) = audio_test_parts().await;
+        tokio::spawn(async move {
+            match rx.recv().await {
+                Some(AudioCommand::SetOutputDevice { device, reply }) => {
+                    assert_eq!(device, "CABLE Input");
+                    let _ = reply.send(Ok(ActiveOutputDevice {
+                        device: "CABLE Input".to_string(),
+                        resolved_name: Some("CABLE Input".to_string()),
+                        available: true,
+                    }));
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        });
+        let response = app
+            .oneshot(authed(
+                "/api/audio/output",
+                &valid,
+                "POST",
+                r#"{"device":"CABLE Input"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["success"], true);
+        assert_eq!(body["device"], "CABLE Input");
+        assert_eq!(body["resolved_name"], "CABLE Input");
+
+        // Unknown devices are 400 with no fallback.
+        let (app, valid, mut rx) = audio_test_parts().await;
+        tokio::spawn(async move {
+            if let Some(AudioCommand::SetOutputDevice { reply, .. }) = rx.recv().await {
+                let _ = reply.send(Err(AudioManagerError::UnknownDevice));
+            }
+        });
+        let response = app
+            .oneshot(authed(
+                "/api/audio/output",
+                &valid,
+                "POST",
+                r#"{"device":"Nope"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(response).await;
+        assert_eq!(body["success"], false);
+    }
+
+    #[cfg(feature = "playback")]
+    #[tokio::test]
+    async fn audio_output_rejects_empty_device_without_contacting_thread() {
+        let (app, valid, rx) = audio_test_parts().await;
+        drop(rx); // No command must be sent: validation happens first.
+        let response = app
+            .oneshot(authed(
+                "/api/audio/output",
+                &valid,
+                "POST",
+                r#"{"device":"  "}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "playback")]
+    #[tokio::test]
+    async fn audio_apis_are_unavailable_without_manager() {
+        let (app, valid) = test_app().await; // audio_manager: None
+        for (method, uri, body) in [
+            ("GET", "/api/audio/devices", ""),
+            ("GET", "/api/audio/output", ""),
+            ("POST", "/api/audio/output", r#"{"device":"default"}"#),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(authed(uri, &valid, method, body))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri} without a manager must be 503"
+            );
+        }
     }
 }

@@ -1,3 +1,4 @@
+use super::devices::{ActiveOutputDevice, OutputDeviceList};
 use anyhow::Result;
 use rodio::{Decoder, OutputStream, Sink};
 use std::collections::{HashSet, VecDeque};
@@ -20,6 +21,22 @@ pub enum AudioManagerError {
     /// respond `503` rather than reporting success.
     #[error("audio playback system unavailable")]
     Unavailable,
+    /// The selected output device is missing or cannot be opened, or a sink
+    /// cannot be created on the live stream. The thread is alive and the
+    /// selection/queue are retained; the caller should respond `503`.
+    #[error("audio output unavailable")]
+    OutputUnavailable,
+    /// The audio file cannot be opened or decoded. Caller-owned files (queue
+    /// API) map to `422`; server-generated files (TTS play) map to `500`.
+    #[error("audio file is invalid or undecodable")]
+    InvalidAudio,
+    /// The requested output device does not exist; the caller should respond
+    /// `400` and must not fall back to another device.
+    #[error("unknown audio output device")]
+    UnknownDevice,
+    /// OS device enumeration failed; the caller should respond `500`.
+    #[error("audio device enumeration failed")]
+    DeviceError,
 }
 
 /// Represents an audio item in the queue
@@ -75,6 +92,14 @@ impl AudioQueue {
     /// Remove and return the next item from the queue
     pub fn dequeue(&mut self) -> Option<AudioItem> {
         self.queue.pop_front()
+    }
+
+    /// Requeue an item at the front. Used when playback stalls on output
+    /// failure — the item itself is not at fault, so it keeps its place
+    /// instead of being dropped or temp-cleaned. A requeued item was already
+    /// admitted, so it never violates the bound.
+    pub fn push_front(&mut self, item: AudioItem) {
+        self.queue.push_front(item);
     }
 
     /// Get the current item being played
@@ -153,8 +178,13 @@ pub enum AudioCommand {
         path: PathBuf,
         reply: oneshot::Sender<Result<(), AudioManagerError>>,
     },
-    /// Play immediately (clears queue)
-    PlayNow { id: String, path: PathBuf },
+    /// Play immediately (clears queue). Replies once the playback thread
+    /// has attempted to start playback — never a blind "sent" success.
+    PlayNow {
+        id: String,
+        path: PathBuf,
+        reply: oneshot::Sender<Result<(), AudioManagerError>>,
+    },
     /// Play next in queue
     PlayNext,
     /// Pause
@@ -169,6 +199,23 @@ pub enum AudioCommand {
     RegisterTemp { path: PathBuf },
     /// Get status (returns sender for response)
     GetStatus(oneshot::Sender<QueueStatus>),
+    /// List output devices. The audio thread enumerates; backend failure
+    /// replies [`AudioManagerError::DeviceError`] (the API reports `500`,
+    /// never an empty success).
+    GetOutputDevices {
+        reply: oneshot::Sender<Result<OutputDeviceList, AudioManagerError>>,
+    },
+    /// Report the configured selection versus live hardware state.
+    GetOutputDevice {
+        reply: oneshot::Sender<ActiveOutputDevice>,
+    },
+    /// Switch the output device. The switch commits only if the new stream
+    /// opens; unknown devices reply [`AudioManagerError::UnknownDevice`]
+    /// without touching the active output.
+    SetOutputDevice {
+        device: String,
+        reply: oneshot::Sender<Result<ActiveOutputDevice, AudioManagerError>>,
+    },
 }
 
 /// Thread-safe audio manager that runs rodio in a separate thread
@@ -180,17 +227,32 @@ pub struct AudioManager {
 impl AudioManager {
     /// Create a new audio manager and start the audio thread.
     /// `max_queue_items` bounds the waiting queue; `0` means the default.
+    /// The initial output selection follows the OS default device.
     pub fn new(max_queue_items: usize) -> Result<Self> {
+        Self::with_output_device(
+            max_queue_items,
+            super::devices::DEFAULT_DEVICE_ID.to_string(),
+        )
+    }
+
+    /// Create a new audio manager with an explicit initial output selection
+    /// (`default` or a device name; see `AUDIO_OUTPUT_DEVICE`).
+    ///
+    /// A missing device never fails startup: the selection is retained, a
+    /// warning is logged, and the thread retries whenever playback is
+    /// attempted (only configuration *syntax* errors fail startup).
+    pub fn with_output_device(max_queue_items: usize, output_device: String) -> Result<Self> {
         let max_queue_items = if max_queue_items == 0 {
             DEFAULT_MAX_QUEUE_ITEMS
         } else {
             max_queue_items
         };
+        let initial_device = super::devices::normalize_selection(&output_device);
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(100);
 
         // Spawn the audio thread
         std::thread::spawn(move || {
-            audio_thread(command_rx, max_queue_items);
+            audio_thread(command_rx, max_queue_items, initial_device);
         });
 
         Ok(Self { command_tx })
@@ -221,12 +283,23 @@ impl AudioManager {
         rx.await.map_err(|_| AudioManagerError::Unavailable)?
     }
 
-    /// Play a specific audio file immediately (clears queue)
+    /// Play a specific audio file immediately (clears queue).
+    ///
+    /// Completes only after the playback thread has attempted to start
+    /// playback: `Ok` means playback started, [`AudioManagerError::OutputUnavailable`]
+    /// means no output stream/sink, [`AudioManagerError::InvalidAudio`] means
+    /// the file cannot be opened/decoded.
     pub async fn play_now(&self, id: String, path: PathBuf) -> Result<(), AudioManagerError> {
+        let (tx, rx) = oneshot::channel();
         self.command_tx
-            .send(AudioCommand::PlayNow { id, path })
+            .send(AudioCommand::PlayNow {
+                id,
+                path,
+                reply: tx,
+            })
             .await
-            .map_err(|_| AudioManagerError::Unavailable)
+            .map_err(|_| AudioManagerError::Unavailable)?;
+        rx.await.map_err(|_| AudioManagerError::Unavailable)?
     }
 
     /// Play the next item in the queue
@@ -289,19 +362,70 @@ impl AudioManager {
             .map_err(|_| AudioManagerError::Unavailable)?;
         rx.await.map_err(|_| AudioManagerError::Unavailable)
     }
+
+    /// List available output devices plus the current selection.
+    /// [`AudioManagerError::DeviceError`] means OS enumeration failed.
+    pub async fn output_devices(&self) -> Result<OutputDeviceList, AudioManagerError> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(AudioCommand::GetOutputDevices { reply: tx })
+            .await
+            .map_err(|_| AudioManagerError::Unavailable)?;
+        rx.await.map_err(|_| AudioManagerError::Unavailable)?
+    }
+
+    /// Report the configured output selection versus live hardware state.
+    pub async fn output_device(&self) -> Result<ActiveOutputDevice, AudioManagerError> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(AudioCommand::GetOutputDevice { reply: tx })
+            .await
+            .map_err(|_| AudioManagerError::Unavailable)?;
+        rx.await.map_err(|_| AudioManagerError::Unavailable)
+    }
+
+    /// Switch the output device at runtime (`default` or an explicit id).
+    /// The switch commits only if the new stream opens; otherwise the
+    /// previous working output stays active. [`AudioManagerError::UnknownDevice`]
+    /// means the name matched nothing (the API reports `400`).
+    pub async fn set_output_device(
+        &self,
+        device: String,
+    ) -> Result<ActiveOutputDevice, AudioManagerError> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(AudioCommand::SetOutputDevice { device, reply: tx })
+            .await
+            .map_err(|_| AudioManagerError::Unavailable)?;
+        rx.await.map_err(|_| AudioManagerError::Unavailable)?
+    }
 }
 
-/// The audio thread that handles playback
-fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_queue_items: usize) {
+/// The audio thread that handles playback. All Rodio enumeration, stream
+/// opening, and device swapping happens here — never concurrently from HTTP
+/// handlers. `initial_device` is the normalized startup selection.
+fn audio_thread(
+    mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>,
+    max_queue_items: usize,
+    initial_device: String,
+) {
     // Initialize rodio. A missing output device must not kill playback
     // forever: servers often boot before audio is available (USB replug,
-    // remote session, service start). The thread stays alive and
-    // `ensure_audio_output` retries lazily whenever playback is attempted,
-    // so recovery needs no process restart.
-    let mut audio_output = match OutputStream::try_default() {
-        Ok((stream, handle)) => Some((stream, handle)),
+    // remote session, service start). The thread stays alive, the requested
+    // selection is retained, and `ensure_audio_output` retries lazily
+    // whenever playback is attempted, so recovery needs no process restart.
+    let mut selected_device = initial_device;
+    let mut resolved_name: Option<String> = None;
+    let mut audio_output = match open_selected_device(&selected_device) {
+        Ok((stream, handle, name)) => {
+            tracing::info!(device = %name, "Audio output initialized");
+            resolved_name = Some(name);
+            Some((stream, handle))
+        }
         Err(e) => {
-            tracing::warn!("No audio output at startup ({e}); playback will retry when requested");
+            tracing::warn!(
+                "Audio output '{selected_device}' unavailable at startup ({e}); selection retained, playback will retry when requested"
+            );
             None
         }
     };
@@ -318,20 +442,32 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
         .unwrap();
 
     loop {
-        // Recovery tick: when the output device was missing, retry on a
-        // throttle (never every 100 ms tick) and start waiting items once
-        // the device appears. A sink implies a stream, so the finished
-        // check below only runs while output exists.
+        // Recovery tick: when the selected output device is missing, retain
+        // the selection and retry on a throttle (never every 100 ms tick),
+        // keeping pending items queued and starting them once the device
+        // reappears. Never auto-switches to another device. A sink implies
+        // a stream, so the finished check below only runs while output exists.
         if audio_output.is_none() {
             let now = std::time::Instant::now();
             if stream_retry_due(last_stream_retry, now) {
                 last_stream_retry = now;
-                ensure_audio_output(&mut audio_output, true);
+                ensure_audio_output(
+                    &mut audio_output,
+                    &selected_device,
+                    &mut resolved_name,
+                    true,
+                );
             }
             if audio_output.is_some() && sink.is_none() && !queue.is_paused() {
-                if let Some((_, handle)) = audio_output.as_ref() {
-                    play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
-                }
+                pump_queue_when_idle(
+                    &mut audio_output,
+                    &selected_device,
+                    &mut resolved_name,
+                    &mut queue,
+                    &mut sink,
+                    &mut temp_files,
+                    true,
+                );
             }
         }
         // Check if current playback finished
@@ -346,11 +482,17 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
             sink = None;
 
             // Try to play next; broken items clean their temp files and
-            // are skipped so one bad file cannot stall the queue. A sink
-            // implies a live stream, but degrade gracefully regardless.
-            if let Some((_, handle)) = audio_output.as_ref() {
-                play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
-            }
+            // are skipped so one bad file cannot stall the queue, while
+            // output failure requeues the item and drops the dead stream.
+            pump_queue_when_idle(
+                &mut audio_output,
+                &selected_device,
+                &mut resolved_name,
+                &mut queue,
+                &mut sink,
+                &mut temp_files,
+                false,
+            );
         }
 
         // Use blocking recv with timeout
@@ -371,12 +513,18 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                         // Without an output device the item stays queued and
                         // the recovery tick starts it once a device appears.
                         if sink.is_none() && !queue.is_paused() {
-                            if let Some(handle) = ensure_audio_output(&mut audio_output, false) {
-                                play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
-                            }
+                            pump_queue_when_idle(
+                                &mut audio_output,
+                                &selected_device,
+                                &mut resolved_name,
+                                &mut queue,
+                                &mut sink,
+                                &mut temp_files,
+                                false,
+                            );
                         }
                     }
-                    AudioCommand::PlayNow { id, path } => {
+                    AudioCommand::PlayNow { id, path, reply } => {
                         // The replaced current item and every queued item
                         // become unreachable: clean their temp files first.
                         clear_queue_with_cleanup(&mut queue, &mut temp_files);
@@ -386,15 +534,35 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                         sink = None;
 
                         let item = AudioItem { id, path };
-                        let started =
-                            ensure_audio_output(&mut audio_output, false).is_some_and(|handle| {
-                                start_playing(handle, queue.volume(), &mut sink, &item)
-                            });
-                        if started {
-                            queue.set_current(Some(item));
-                        } else {
-                            tracing::warn!(path = ?item.path, "PlayNow failed: playback could not start");
-                            cleanup_item_temp(&item, &mut temp_files);
+                        let attempt = match ensure_audio_output(
+                            &mut audio_output,
+                            &selected_device,
+                            &mut resolved_name,
+                            false,
+                        ) {
+                            None => Err(AudioManagerError::OutputUnavailable),
+                            Some(handle) => start_playing(handle, queue.volume(), &mut sink, &item),
+                        };
+                        match attempt {
+                            Ok(()) => {
+                                queue.set_current(Some(item));
+                                let _ = reply.send(Ok(()));
+                            }
+                            Err(error @ AudioManagerError::OutputUnavailable) => {
+                                // The output itself failed: drop the stream so
+                                // the next attempt re-opens instead of pinning
+                                // a dead handle in the slot forever.
+                                audio_output = None;
+                                resolved_name = None;
+                                tracing::warn!(path = ?item.path, "PlayNow failed: audio output unavailable");
+                                cleanup_item_temp(&item, &mut temp_files);
+                                let _ = reply.send(Err(error));
+                            }
+                            Err(error) => {
+                                tracing::warn!(path = ?item.path, "PlayNow failed: invalid audio");
+                                cleanup_item_temp(&item, &mut temp_files);
+                                let _ = reply.send(Err(error));
+                            }
                         }
                     }
                     AudioCommand::PlayNext => {
@@ -407,9 +575,15 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                             cleanup_item_temp(&interrupted, &mut temp_files);
                         }
 
-                        if let Some(handle) = ensure_audio_output(&mut audio_output, false) {
-                            play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
-                        }
+                        pump_queue_when_idle(
+                            &mut audio_output,
+                            &selected_device,
+                            &mut resolved_name,
+                            &mut queue,
+                            &mut sink,
+                            &mut temp_files,
+                            false,
+                        );
                     }
                     AudioCommand::Pause => {
                         if let Some(s) = &sink {
@@ -422,6 +596,20 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                             s.play();
                         }
                         queue.set_paused(false);
+                        // A device switch while paused drops the sink with
+                        // items still waiting; starting here keeps the queue
+                        // from stalling until the next enqueue.
+                        if sink.is_none() {
+                            pump_queue_when_idle(
+                                &mut audio_output,
+                                &selected_device,
+                                &mut resolved_name,
+                                &mut queue,
+                                &mut sink,
+                                &mut temp_files,
+                                false,
+                            );
+                        }
                     }
                     AudioCommand::Stop => {
                         if let Some(s) = sink.take() {
@@ -455,6 +643,27 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                             volume: queue.volume(),
                         });
                     }
+                    AudioCommand::GetOutputDevices { reply } => {
+                        let _ = reply.send(handle_get_output_devices(&selected_device));
+                    }
+                    AudioCommand::GetOutputDevice { reply } => {
+                        let _ = reply.send(current_active_device(
+                            &selected_device,
+                            &resolved_name,
+                            &audio_output,
+                        ));
+                    }
+                    AudioCommand::SetOutputDevice { device, reply } => {
+                        let _ = reply.send(handle_set_output_device(
+                            &mut audio_output,
+                            &mut selected_device,
+                            &mut resolved_name,
+                            &mut queue,
+                            &mut sink,
+                            &mut temp_files,
+                            &device,
+                        ));
+                    }
                 }
             }
             Ok(None) => {
@@ -475,24 +684,67 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
     }
 }
 
-/// Start the next playable queued item, skipping (and temp-cleaning)
-/// broken items so one bad file cannot stall the queue behind it.
-/// Returns when something plays or the queue is empty.
+/// Outcome of attempting to start queued playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayNextOutcome {
+    /// Something is playing or the queue is empty (nothing more to do).
+    Settled,
+    /// The output itself failed (sink creation): the dequeued item was
+    /// requeued at the front and the caller must drop the stream so the next
+    /// attempt re-opens it.
+    OutputDead,
+}
+
+/// Start the next playable queued item, skipping (and temp-cleaning) broken
+/// items so one bad file cannot stall the queue behind it. Output failure is
+/// not the item's fault: the item is requeued and [`PlayNextOutcome::OutputDead`]
+/// is returned. Returns when something plays or the queue is empty.
 fn play_next_available(
     stream_handle: &rodio::OutputStreamHandle,
     queue: &mut AudioQueue,
     sink_slot: &mut Option<Sink>,
     temp_files: &mut HashSet<PathBuf>,
-) {
+) -> PlayNextOutcome {
     while sink_slot.is_none() {
         let Some(item) = queue.dequeue() else {
             break;
         };
-        if start_playing(stream_handle, queue.volume(), sink_slot, &item) {
-            queue.set_current(Some(item));
-            break;
+        match start_playing(stream_handle, queue.volume(), sink_slot, &item) {
+            Ok(()) => {
+                queue.set_current(Some(item));
+                break;
+            }
+            Err(AudioManagerError::InvalidAudio) => {
+                cleanup_item_temp(&item, temp_files);
+            }
+            Err(_) => {
+                tracing::warn!(path = ?item.path, "Playback stalled: output unavailable, item requeued");
+                queue.push_front(item);
+                return PlayNextOutcome::OutputDead;
+            }
         }
-        cleanup_item_temp(&item, temp_files);
+    }
+    PlayNextOutcome::Settled
+}
+
+/// Ensure the output stream exists and start the next queued item when idle.
+/// A dead stream is dropped (with its resolved name) so the next attempt
+/// re-opens the retained selection.
+#[allow(clippy::too_many_arguments)]
+fn pump_queue_when_idle(
+    slot: &mut Option<(OutputStream, rodio::OutputStreamHandle)>,
+    selected: &str,
+    resolved: &mut Option<String>,
+    queue: &mut AudioQueue,
+    sink_slot: &mut Option<Sink>,
+    temp_files: &mut HashSet<PathBuf>,
+    quiet: bool,
+) {
+    let outcome = ensure_audio_output(slot, selected, resolved, quiet)
+        .map(|handle| play_next_available(handle, queue, sink_slot, temp_files));
+    if matches!(outcome, Some(PlayNextOutcome::OutputDead)) {
+        *slot = None;
+        *resolved = None;
     }
 }
 
@@ -507,25 +759,94 @@ fn stream_retry_due(last_retry: std::time::Instant, now: std::time::Instant) -> 
     now.duration_since(last_retry) >= STREAM_RETRY_INTERVAL
 }
 
-/// Returns the output handle, initializing the default audio stream when it
-/// is missing (first use, or recovery after the device was unavailable).
-/// `quiet` keeps periodic background retries at debug level; attempts that
-/// back a user command always warn loudly so silence is never mysterious.
-fn ensure_audio_output(
-    slot: &mut Option<(OutputStream, rodio::OutputStreamHandle)>,
+/// Open the OS default output stream.
+fn open_default_stream()
+-> Result<(OutputStream, rodio::OutputStreamHandle, String), AudioManagerError> {
+    let (stream, handle) = OutputStream::try_default().map_err(|e| {
+        tracing::debug!("Default audio output unavailable: {e}");
+        AudioManagerError::OutputUnavailable
+    })?;
+    // Best-effort resolved name (rodio may fall back past the OS default
+    // internally, so this labels the selection, not the wire).
+    let name = {
+        use rodio::cpal::traits::{DeviceTrait, HostTrait};
+        rodio::cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_else(|| "System Default".to_string())
+    };
+    Ok((stream, handle, name))
+}
+
+/// Open the `occurrence`-th OS output device named `name`.
+fn open_named_stream(
+    name: &str,
+    occurrence: usize,
+) -> Result<(OutputStream, rodio::OutputStreamHandle, String), AudioManagerError> {
+    let device = super::devices::find_host_device(name, occurrence).ok_or_else(|| {
+        tracing::debug!("Audio output device '{name}' disappeared before open");
+        AudioManagerError::OutputUnavailable
+    })?;
+    let (stream, handle) = OutputStream::try_from_device(&device).map_err(|e| {
+        tracing::warn!("Cannot open audio output device '{name}': {e}");
+        AudioManagerError::OutputUnavailable
+    })?;
+    Ok((stream, handle, name.to_string()))
+}
+
+/// Open the stream for a normalized selection (`default` or an explicit id).
+///
+/// A retained explicit device that is currently missing reports
+/// [`AudioManagerError::OutputUnavailable`] (retryable — the selection is
+/// kept); only fresh runtime requests are validated as
+/// [`AudioManagerError::UnknownDevice`] by [`handle_set_output_device`].
+fn open_selected_device(
+    selected: &str,
+) -> Result<(OutputStream, rodio::OutputStreamHandle, String), AudioManagerError> {
+    if super::devices::is_default_selection(selected) {
+        return open_default_stream();
+    }
+    let (names, _) = super::devices::enumerate_host_devices().map_err(|e| {
+        tracing::debug!("Audio device lookup failed: {e}");
+        AudioManagerError::DeviceError
+    })?;
+    // Missing here means "not currently present" (disconnect/reconnect
+    // race or a startup selection for an unplugged device): retain and
+    // retry rather than rejecting the selection itself.
+    let matched = super::devices::match_hardware(selected, &names)
+        .ok_or(AudioManagerError::OutputUnavailable)?;
+    match matched {
+        super::devices::DeviceMatch::Default => open_default_stream(),
+        super::devices::DeviceMatch::Named { name, occurrence } => {
+            open_named_stream(&name, occurrence)
+        }
+    }
+}
+
+/// Returns the output handle, initializing the stream for the retained
+/// `selected` device when it is missing (first use, or recovery after the
+/// device was unavailable). `quiet` keeps periodic background retries at
+/// debug level; attempts that back a user command always warn loudly so
+/// silence is never mysterious.
+fn ensure_audio_output<'a>(
+    slot: &'a mut Option<(OutputStream, rodio::OutputStreamHandle)>,
+    selected: &str,
+    resolved: &mut Option<String>,
     quiet: bool,
-) -> Option<&rodio::OutputStreamHandle> {
+) -> Option<&'a rodio::OutputStreamHandle> {
     if slot.is_none() {
-        match OutputStream::try_default() {
-            Ok((stream, handle)) => {
-                tracing::info!("Audio output initialized");
+        match open_selected_device(selected) {
+            Ok((stream, handle, name)) => {
+                tracing::info!(device = %name, "Audio output initialized");
+                *resolved = Some(name);
                 *slot = Some((stream, handle));
             }
             Err(error) => {
+                *resolved = None;
                 if quiet {
-                    tracing::debug!("Audio output still unavailable: {error}");
+                    tracing::debug!("Audio output '{selected}' still unavailable: {error}");
                 } else {
-                    tracing::warn!("Audio output unavailable: {error}");
+                    tracing::warn!("Audio output '{selected}' unavailable: {error}");
                 }
                 return None;
             }
@@ -536,42 +857,125 @@ fn ensure_audio_output(
 
 /// Attempt to start playback of `item` into `sink_slot`.
 ///
-/// Returns `true` when playback started. Any failure (missing file,
-/// undecodable audio, sink creation) logs loudly and returns `false`; the
-/// caller must clean the item's temp file via [`cleanup_item_temp`].
-/// Silence here used to be total (no logs, HTTP 200 anyway), which made
-/// every playback failure undebuggable from the operator side.
+/// `Ok` means playback started. [`AudioManagerError::InvalidAudio`] covers
+/// missing/undecodable files; [`AudioManagerError::OutputUnavailable`]
+/// covers sink creation on a dead stream. The caller must clean the item's
+/// temp file via [`cleanup_item_temp`] on [`AudioManagerError::InvalidAudio`].
 fn start_playing(
     stream_handle: &rodio::OutputStreamHandle,
     volume: f32,
     sink_slot: &mut Option<Sink>,
     item: &AudioItem,
-) -> bool {
+) -> Result<(), AudioManagerError> {
     let file = match File::open(&item.path) {
         Ok(file) => file,
         Err(error) => {
             tracing::warn!(path = ?item.path, "Playback failed: cannot open audio file: {error}");
-            return false;
+            return Err(AudioManagerError::InvalidAudio);
         }
     };
     let source = match Decoder::new(BufReader::new(file)) {
         Ok(source) => source,
         Err(error) => {
             tracing::warn!(path = ?item.path, "Playback failed: cannot decode audio file: {error:?}");
-            return false;
+            return Err(AudioManagerError::InvalidAudio);
         }
     };
     let new_sink = match Sink::try_new(stream_handle) {
         Ok(sink) => sink,
         Err(error) => {
             tracing::warn!("Playback failed: cannot create audio sink: {error:?}");
-            return false;
+            return Err(AudioManagerError::OutputUnavailable);
         }
     };
     new_sink.set_volume(volume);
     new_sink.append(source);
     *sink_slot = Some(new_sink);
-    true
+    Ok(())
+}
+
+/// Snapshot the configured selection versus live hardware state.
+fn current_active_device(
+    selected: &str,
+    resolved: &Option<String>,
+    slot: &Option<(OutputStream, rodio::OutputStreamHandle)>,
+) -> ActiveOutputDevice {
+    ActiveOutputDevice {
+        device: selected.to_string(),
+        resolved_name: resolved.clone(),
+        available: slot.is_some(),
+    }
+}
+
+/// Enumerate output devices for `GET /api/audio/devices` (audio thread).
+fn handle_get_output_devices(selected: &str) -> Result<OutputDeviceList, AudioManagerError> {
+    let (names, default_name) = super::devices::enumerate_host_devices().map_err(|e| {
+        tracing::warn!("Audio device enumeration failed: {e}");
+        AudioManagerError::DeviceError
+    })?;
+    Ok(super::devices::build_device_list(
+        names,
+        default_name.as_deref(),
+        selected,
+    ))
+}
+
+/// Switch the output device (audio thread only).
+///
+/// 1. Normalize and validate the request against live enumeration — unknown
+///    names are rejected without touching the active output.
+/// 2. Open the new stream; on failure the previous working output stays
+///    active and the selection is unchanged.
+/// 3. On success: stop the current sink, drop the interrupted item (its temp
+///    is cleaned, like `PlayNext` — the waiting queue is never cleared),
+///    commit the stream + selection, and continue with queued items on the
+///    new device (unless paused; `Resume` starts the queue then).
+#[allow(clippy::too_many_arguments)]
+fn handle_set_output_device(
+    slot: &mut Option<(OutputStream, rodio::OutputStreamHandle)>,
+    selected: &mut String,
+    resolved: &mut Option<String>,
+    queue: &mut AudioQueue,
+    sink_slot: &mut Option<Sink>,
+    temp_files: &mut HashSet<PathBuf>,
+    requested: &str,
+) -> Result<ActiveOutputDevice, AudioManagerError> {
+    let normalized = super::devices::normalize_selection(requested);
+    if normalized == *selected && slot.is_some() {
+        return Ok(current_active_device(selected, resolved, slot));
+    }
+    let (names, _) = super::devices::enumerate_host_devices().map_err(|e| {
+        tracing::warn!(
+            "Output device switch to '{normalized}' failed: cannot enumerate devices: {e}"
+        );
+        AudioManagerError::DeviceError
+    })?;
+    let matched = super::devices::match_hardware(&normalized, &names).ok_or_else(|| {
+        tracing::info!("Unknown audio output device requested: '{normalized}'");
+        AudioManagerError::UnknownDevice
+    })?;
+    let (new_stream, new_handle, new_resolved) = match matched {
+        super::devices::DeviceMatch::Default => open_default_stream()?,
+        super::devices::DeviceMatch::Named { name, occurrence } => {
+            open_named_stream(&name, occurrence)?
+        }
+    };
+    if let Some(s) = sink_slot.take() {
+        s.stop();
+    }
+    if let Some(interrupted) = queue.take_current() {
+        cleanup_item_temp(&interrupted, temp_files);
+    }
+    *slot = Some((new_stream, new_handle));
+    *selected = normalized;
+    *resolved = Some(new_resolved);
+    tracing::info!(device = %selected, resolved = ?resolved, "Audio output device switched");
+    if !queue.is_paused() {
+        pump_queue_when_idle(
+            slot, selected, resolved, queue, sink_slot, temp_files, false,
+        );
+    }
+    Ok(current_active_device(selected, resolved, slot))
 }
 
 /// Status information about the queue
@@ -961,6 +1365,31 @@ mod tests {
             manager.status().await.unwrap_err(),
             AudioManagerError::Unavailable
         );
+        assert_eq!(
+            manager.output_devices().await.unwrap_err(),
+            AudioManagerError::Unavailable
+        );
+        assert_eq!(
+            manager.output_device().await.unwrap_err(),
+            AudioManagerError::Unavailable
+        );
+        assert_eq!(
+            manager
+                .set_output_device("default".to_string())
+                .await
+                .unwrap_err(),
+            AudioManagerError::Unavailable
+        );
+    }
+
+    #[test]
+    fn requeued_item_keeps_its_place_without_bound_violation() {
+        let mut queue = AudioQueue::with_max_items(1);
+        queue.enqueue(item("a", PathBuf::from("a.wav"))).unwrap();
+        let stalled = queue.dequeue().unwrap();
+        queue.push_front(stalled);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.dequeue().unwrap().id, "a");
     }
 
     #[tokio::test]
@@ -999,5 +1428,97 @@ mod tests {
         let status = manager.status().await.unwrap();
         assert_eq!(status.queue_length, 3);
         assert!(status.is_playing);
+    }
+
+    #[tokio::test]
+    async fn play_now_reply_propagates_playback_outcome() {
+        // Success: the thread started playback.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(AudioCommand::PlayNow { reply, .. }) = rx.recv().await {
+                let _ = reply.send(Ok(()));
+            }
+        });
+        let manager = AudioManager::for_test(tx);
+        assert!(
+            manager
+                .play_now("a".into(), PathBuf::from("x.wav"))
+                .await
+                .is_ok()
+        );
+
+        // Failure: no output stream/sink — the caller must see the error,
+        // never a blind "Playing immediately" success.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(AudioCommand::PlayNow { reply, .. }) = rx.recv().await {
+                let _ = reply.send(Err(AudioManagerError::OutputUnavailable));
+            }
+        });
+        let manager = AudioManager::for_test(tx);
+        assert_eq!(
+            manager.play_now("a".into(), PathBuf::from("x.wav")).await,
+            Err(AudioManagerError::OutputUnavailable)
+        );
+
+        // Failure: undecodable file.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(AudioCommand::PlayNow { reply, .. }) = rx.recv().await {
+                let _ = reply.send(Err(AudioManagerError::InvalidAudio));
+            }
+        });
+        let manager = AudioManager::for_test(tx);
+        assert_eq!(
+            manager.play_now("a".into(), PathBuf::from("x.wav")).await,
+            Err(AudioManagerError::InvalidAudio)
+        );
+    }
+
+    #[tokio::test]
+    async fn device_command_replies_propagate() {
+        use super::super::devices::{ActiveOutputDevice, OutputDeviceList};
+
+        // Device list.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(AudioCommand::GetOutputDevices { reply }) = rx.recv().await {
+                let _ = reply.send(Ok(OutputDeviceList {
+                    devices: vec![],
+                    selected: "default".to_string(),
+                }));
+            }
+        });
+        let manager = AudioManager::for_test(tx);
+        let list = manager.output_devices().await.unwrap();
+        assert_eq!(list.selected, "default");
+
+        // Active device.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(AudioCommand::GetOutputDevice { reply }) = rx.recv().await {
+                let _ = reply.send(ActiveOutputDevice {
+                    device: "default".to_string(),
+                    resolved_name: Some("Speakers".to_string()),
+                    available: true,
+                });
+            }
+        });
+        let manager = AudioManager::for_test(tx);
+        let active = manager.output_device().await.unwrap();
+        assert!(active.available);
+
+        // Unknown device selection is an error, never a silent fallback.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(AudioCommand::SetOutputDevice { reply, .. }) = rx.recv().await {
+                let _ = reply.send(Err(AudioManagerError::UnknownDevice));
+            }
+        });
+        let manager = AudioManager::for_test(tx);
+        assert_eq!(
+            manager.set_output_device("Nope".to_string()).await,
+            Err(AudioManagerError::UnknownDevice)
+        );
     }
 }

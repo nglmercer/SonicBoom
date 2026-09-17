@@ -47,7 +47,7 @@ pub struct AppState {
     pub audio_manager: Arc<Option<AudioManager>>,
     /// Bounded admission control for model inference (see [`InferenceGate`]).
     pub inference_gate: Arc<InferenceGate>,
-    /// Per-token sliding-window rate limiter for expensive endpoints.
+    /// Per-token token-bucket rate limiter for expensive endpoints.
     pub rate_limiter: Arc<RateLimiter>,
 }
 
@@ -718,7 +718,10 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     let model_status = Arc::new(RwLock::new(ModelStatus::Idle));
 
     #[cfg(feature = "playback")]
-    let audio_manager = match AudioManager::new(config.max_playback_queue_items) {
+    let audio_manager = match AudioManager::with_output_device(
+        config.max_playback_queue_items,
+        config.audio_output_device.clone(),
+    ) {
         Ok(manager) => Arc::new(Some(manager)),
         Err(e) => {
             tracing::warn!("Failed to initialize audio manager: {}", e);
@@ -747,9 +750,10 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         config.max_concurrent_inference,
         config.max_pending_inference,
     ));
-    let rate_limiter = Arc::new(RateLimiter::new(
+    let rate_limiter = Arc::new(RateLimiter::with_burst(
         config.tts_rate_limit_requests,
         config.tts_rate_limit_window_secs,
+        config.tts_rate_limit_burst,
     ));
 
     let app_state = AppState {
