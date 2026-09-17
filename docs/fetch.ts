@@ -22,7 +22,7 @@ export interface TtsPlayResponse {
 /**
  * Synthesizes text and plays it directly on the SonicBoom server's audio output.
  *
- * @param baseUrl - The base URL of the SonicBoom server (e.g., 'http://localhost:3000')
+ * @param baseUrl - The base URL of the SonicBoom server (e.g., 'http://localhost:17842')
  * @param token - Your API authorization token
  * @param text - The text to synthesize and play
  * @param options - Optional synthesis and playback parameters
@@ -71,7 +71,7 @@ export async function synthesizeAndPlay(
 
 // --- Usage Example ---
 
-const SONICBOOM_URL = "http://localhost:3000";
+const SONICBOOM_URL = "http://localhost:17842";
 const MY_TOKEN = "sk-your-token-here";
 
 synthesizeAndPlay(

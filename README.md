@@ -43,7 +43,7 @@ cargo build --release --features gui
 # Set environment variables (admin password is REQUIRED, 12+ chars).
 # Generate one — never reuse a documented placeholder:
 #   python3 -c 'import secrets; print(secrets.token_urlsafe(24))'
-export PORT=3000
+export PORT=17842
 export SONICBOOM_ADMIN_ID=admin
 export SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD>
 export ALLOWED_AUDIO_DIR=./audio   # required for playback builds
@@ -59,7 +59,7 @@ cargo run --release
 
 The server will:
 
-1. Start listening on port 3000
+1. Start listening on port 17842
 2. Download the Supertonic 3 model (first run)
 3. Load the model
 4. Be ready to serve TTS requests
@@ -139,13 +139,13 @@ The server will:
 ```bash
 # Using original API
 # Audio is encoded as Opus inside an OGG container (Content-Type: audio/ogg; codecs=opus).
-curl -X POST "http://localhost:3000/api/tts?voice=F1" \
+curl -X POST "http://localhost:17842/api/tts?voice=F1" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Hello, world!" \
   --output audio.ogg
 
 # Using OpenAI-compatible API
-curl -X POST http://localhost:3000/v1/audio/speech \
+curl -X POST http://localhost:17842/v1/audio/speech \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"input": "Hello, world!", "voice": "alloy"}' \
@@ -214,7 +214,7 @@ SonicBoom/
 ```bash
 # Build and run with Docker (headless CPU server; no local playback)
 docker build -t sonicboom .
-docker run -p 127.0.0.1:3000:3000 \
+docker run -p 127.0.0.1:17842:17842 \
   -e SONICBOOM_ADMIN_ID=admin \
   -e SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD> \
   -e HF_TOKEN=your_hf_token \

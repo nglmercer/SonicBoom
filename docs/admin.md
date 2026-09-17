@@ -4,7 +4,7 @@ SonicBoom includes a web-based admin panel for managing API tokens and monitorin
 
 ## Accessing the Admin Panel
 
-**URL:** `http://localhost:3000/admin`
+**URL:** `http://localhost:17842/admin`
 
 **Credentials:** configured via environment variables — there are no defaults:
 

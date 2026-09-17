@@ -100,7 +100,7 @@ mod tests {
             model_hashes_path: None,
             hf_token: None,
             inference_steps: 5,
-            port: 3000,
+            port: 17842,
             log_dir: String::new(),
             log_level: "info".to_string(),
             log_to_file: false,

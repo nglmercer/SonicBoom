@@ -21,7 +21,7 @@ and empty assignments are rejected.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` | Server port |
+| `PORT` | `17842` | Server port |
 | `SONICBOOM_ADMIN_ID` | `admin` | Admin panel username (must not be empty) |
 | `SONICBOOM_ADMIN_PW` | _(none, required)_ | Admin panel password (min 12 Unicode chars; no defaults/placeholders accepted) |
 
@@ -85,7 +85,7 @@ and empty assignments are rejected.
 ### Linux/macOS
 
 ```bash
-export PORT=3000
+export PORT=17842
 export SONICBOOM_ADMIN_ID=admin
 # Generate a real password: python3 -c 'import secrets; print(secrets.token_urlsafe(24))'
 export SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD>
@@ -99,7 +99,7 @@ export ALLOWED_AUDIO_DIR=./audio
 ### Windows (PowerShell)
 
 ```powershell
-$env:PORT=3000
+$env:PORT=17842
 $env:SONICBOOM_ADMIN_ID="admin"
 # Generate a real password instead of reusing a placeholder.
 $env:SONICBOOM_ADMIN_PW="<GENERATE-A-RANDOM-PASSWORD>"
@@ -110,7 +110,7 @@ $env:SONICBOOM_ADMIN_PW="<GENERATE-A-RANDOM-PASSWORD>"
 Create a `.env` file (gitignored — never commit secrets):
 
 ```bash
-PORT=3000
+PORT=17842
 SONICBOOM_ADMIN_ID=admin
 # Generate a real password: python3 -c 'import secrets; print(secrets.token_urlsafe(24))'
 SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD>
@@ -135,9 +135,9 @@ services:
   sonicboom:
     image: sonicboom
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:17842:17842"
     environment:
-      - PORT=3000
+      - PORT=17842
       - SONICBOOM_ADMIN_ID=admin
       - SONICBOOM_ADMIN_PW=${SONICBOOM_ADMIN_PW:?required}
       - HF_TOKEN=your_hf_token

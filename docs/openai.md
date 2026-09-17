@@ -52,7 +52,7 @@ Synthesizes text to speech using OpenAI-compatible request format.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/v1/audio/speech \
+curl -X POST http://localhost:17842/v1/audio/speech \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -127,7 +127,7 @@ non-sensitive model identifiers; see below)
 **Example:**
 
 ```bash
-curl http://localhost:3000/v1/models
+curl http://localhost:17842/v1/models
 ```
 
 ---
@@ -164,7 +164,7 @@ non-sensitive voice names; see below)
 **Example:**
 
 ```bash
-curl http://localhost:3000/v1/voices
+curl http://localhost:17842/v1/voices
 ```
 
 ---
@@ -210,7 +210,7 @@ response.stream_to_file("output.mp3")
 ```python
 import requests
 
-url = "http://localhost:3000/v1/audio/speech"
+url = "http://localhost:17842/v1/audio/speech"
 headers = {
     "Authorization": "Bearer YOUR_TOKEN",
     "Content-Type": "application/json"

@@ -44,7 +44,7 @@ body capped at `TTS_MAX_BODY_BYTES`)
 
 ```bash
 # Get WAV output
-curl -X POST "http://localhost:3000/api/tts?voice=F1&format=wav" \
+curl -X POST "http://localhost:17842/api/tts?voice=F1&format=wav" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Hello, world!" \
   --output audio.wav
@@ -83,7 +83,7 @@ Synthesizes text and adds it directly to the server's playback queue in a single
 **Example:**
 
 ```bash
-curl -X POST "http://localhost:3000/api/tts/play?voice=F1&play_now=true" \
+curl -X POST "http://localhost:17842/api/tts/play?voice=F1&play_now=true" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Synthesize and play this immediately on the server speakers."
 ```
@@ -112,7 +112,7 @@ non-sensitive load status; see [OpenAI docs](openai.md#public-metadata-endpoints
 **Example:**
 
 ```bash
-curl http://localhost:3000/api/status
+curl http://localhost:17842/api/status
 ```
 
 **Example Response:**
@@ -158,7 +158,7 @@ a dead audio thread returns `503`.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/api/queue \
+curl -X POST http://localhost:17842/api/queue \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -207,7 +207,7 @@ Adjust the master volume for audio playback.
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3000/api/queue/volume \
+curl -X POST http://localhost:17842/api/queue/volume \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"volume": 0.5}'
@@ -263,7 +263,7 @@ Liveness endpoint for container `HEALTHCHECK` and monitoring.
 **Example:**
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:17842/health
 ```
 
 ### Readiness Check
@@ -280,7 +280,7 @@ Readiness endpoint for load balancers and orchestrators.
 **Example:**
 
 ```bash
-curl http://localhost:3000/ready
+curl http://localhost:17842/ready
 ```
 
 ---
@@ -349,7 +349,7 @@ buffer (not an incremental stream).
 
 ```bash
 # Get WAV output
-curl -X POST "http://localhost:3000/api/tts?format=wav" \
+curl -X POST "http://localhost:17842/api/tts?format=wav" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -d "Hello, world!" \
   --output audio.wav
@@ -358,7 +358,7 @@ curl -X POST "http://localhost:3000/api/tts?format=wav" \
 **OpenAI API:**
 
 ```bash
-curl -X POST http://localhost:3000/v1/audio/speech \
+curl -X POST http://localhost:17842/v1/audio/speech \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"input": "Hello, world!", "voice": "alloy", "response_format": "wav"}' \

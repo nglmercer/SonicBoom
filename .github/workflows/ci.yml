@@ -237,11 +237,11 @@ jobs:
 
       - name: Verify CPU runtime starts
         run: |
-          docker run -d --name sonicboom-ci -p 127.0.0.1:3000:3000 \
+          docker run -d --name sonicboom-ci -p 127.0.0.1:17842:17842 \
             -e SONICBOOM_ADMIN_PW=ci-local-testing-password-123 \
             sonicboom:cpu
           sleep 8
-          curl -fsS http://127.0.0.1:3000/health
+          curl -fsS http://127.0.0.1:17842/health
           docker stop sonicboom-ci
           docker rm sonicboom-ci
 

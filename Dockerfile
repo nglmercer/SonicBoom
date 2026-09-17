@@ -212,7 +212,7 @@ RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
 
 ENV LD_LIBRARY_PATH=/app/ort-lib:/app
 ENV RUST_LOG=info
-ENV PORT=3000
+ENV PORT=17842
 ENV MODEL_CACHE_DIR=/app/models
 ENV LOG_DIR=/app/logs
 ENV TOKEN_STORE_PATH=/app/data/tokens.json
@@ -220,10 +220,10 @@ ENV TEMP_AUDIO_DIR=/app/temp_audio
 
 USER sonicboom
 
-EXPOSE 3000
+EXPOSE 17842
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:3000/health || exit 1
+    CMD curl -fsS http://127.0.0.1:17842/health || exit 1
 
 CMD ["/app/sonicboom"]
 # ============================================================================
@@ -258,7 +258,7 @@ RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
 
 ENV LD_LIBRARY_PATH=/app/ort-lib:/app
 ENV RUST_LOG=info
-ENV PORT=3000
+ENV PORT=17842
 ENV MODEL_CACHE_DIR=/app/models
 ENV LOG_DIR=/app/logs
 ENV TOKEN_STORE_PATH=/app/data/tokens.json
@@ -266,10 +266,10 @@ ENV TEMP_AUDIO_DIR=/app/temp_audio
 
 USER sonicboom
 
-EXPOSE 3000
+EXPOSE 17842
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:3000/health || exit 1
+    CMD curl -fsS http://127.0.0.1:17842/health || exit 1
 
 CMD ["/app/sonicboom"]
 
@@ -305,7 +305,7 @@ RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
 
 ENV LD_LIBRARY_PATH=/app/ort-lib:/app
 ENV RUST_LOG=info
-ENV PORT=3000
+ENV PORT=17842
 ENV MODEL_CACHE_DIR=/app/models
 ENV LOG_DIR=/app/logs
 ENV TOKEN_STORE_PATH=/app/data/tokens.json
@@ -313,10 +313,10 @@ ENV TEMP_AUDIO_DIR=/app/temp_audio
 
 USER sonicboom
 
-EXPOSE 3000
+EXPOSE 17842
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:3000/health || exit 1
+    CMD curl -fsS http://127.0.0.1:17842/health || exit 1
 
 CMD ["/app/sonicboom"]
 

@@ -86,7 +86,7 @@ mod tests {
             model_hashes_path: None,
             hf_token: None,
             inference_steps: 5,
-            port: 3000,
+            port: 17842,
             log_dir: String::new(),
             log_level: "info".to_string(),
             log_to_file: false,
@@ -205,9 +205,9 @@ mod tests {
     async fn spoofed_referer_and_host_do_not_authenticate() {
         let (app, _) = test_app().await;
         let request = Request::post("/api/tts")
-            .header("host", "localhost:3000")
-            .header("referer", "http://localhost:3000/")
-            .header("origin", "http://localhost:3000")
+            .header("host", "localhost:17842")
+            .header("referer", "http://localhost:17842/")
+            .header("origin", "http://localhost:17842")
             .body(Body::from("hello"))
             .unwrap();
         assert_eq!(
@@ -217,8 +217,8 @@ mod tests {
 
         let (app, _) = test_app().await;
         let request = Request::post("/v1/audio/speech")
-            .header("host", "localhost:3000")
-            .header("referer", "http://localhost:3000/")
+            .header("host", "localhost:17842")
+            .header("referer", "http://localhost:17842/")
             .body(Body::from(r#"{"input":"hello"}"#))
             .unwrap();
         assert_eq!(

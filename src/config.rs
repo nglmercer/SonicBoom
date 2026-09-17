@@ -236,7 +236,7 @@ impl AppConfig {
             model_hashes_path: get("MODEL_SHA256_JSON_PATH"),
             hf_token: get("HF_TOKEN"),
             inference_steps: env_usize(&get, "INFERENCE_STEPS", 5)?,
-            port: env_parse(&get, "PORT", 3000)?,
+            port: env_parse(&get, "PORT", 17842)?,
             // Logging settings
             log_dir: get("LOG_DIR").unwrap_or_else(|| "./logs".to_string()),
             log_level: get("LOG_LEVEL").unwrap_or_else(|| "info".to_string()),
@@ -465,7 +465,7 @@ mod tests {
             model_hashes_path: None,
             hf_token: None,
             inference_steps: 5,
-            port: 3000,
+            port: 17842,
             log_dir: "./logs".to_string(),
             log_level: "info".to_string(),
             log_to_file: true,

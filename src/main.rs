@@ -191,6 +191,8 @@ fn ensure_gui_env() {
     #[cfg(feature = "playback")]
     dir_default("ALLOWED_AUDIO_DIR", "audio", true);
 
+    ensure_gui_port(&base_dir);
+
     // First run: no admin password anywhere -> generate + persist.
     let pw_missing = env::var("SONICBOOM_ADMIN_PW")
         .map(|v| v.trim().is_empty())
@@ -288,6 +290,164 @@ fn persist_env_value(
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+/// Instance record so tools and double-clicks can discover the running
+/// server. Rewritten on every gui start; a stale record is harmless because
+/// the next start re-probes the recorded port before trusting it.
+#[cfg(feature = "gui")]
+const GUI_LOCK_FILE: &str = "sonicboom.lock";
+/// How far past `PORT` to scan for a free port before giving up.
+#[cfg(feature = "gui")]
+const GUI_PORT_SCAN_RANGE: u32 = 20;
+
+#[cfg(feature = "gui")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortProbe {
+    /// Something answers HTTP 200 on `/health` (ours or a foreign app).
+    HttpOk,
+    /// Nothing answers and a test bind succeeds.
+    Free,
+    /// Nothing answers, but the port cannot be bound (a non-HTTP owner).
+    Taken,
+}
+
+/// Parse a `sonicboom.lock` body (`pid=<n> port=<n>`, whitespace-separated,
+/// extra tokens ignored). Returns `None` when either field is missing or
+/// malformed.
+#[cfg(feature = "gui")]
+fn parse_lock_content(text: &str) -> Option<(u32, u16)> {
+    let mut pid = None;
+    let mut port = None;
+    for token in text.split_whitespace() {
+        if let Some(v) = token.strip_prefix("pid=") {
+            pid = v.trim().parse().ok();
+        } else if let Some(v) = token.strip_prefix("port=") {
+            port = v.trim().parse().ok();
+        }
+    }
+    Some((pid?, port?))
+}
+
+/// Classify a port: HTTP-200 responder, bindable, or otherwise taken.
+#[cfg(feature = "gui")]
+fn probe_port(port: u16) -> PortProbe {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let req = format!(
+            "GET /health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_ok() {
+            let mut buf = [0u8; 1024];
+            let mut head = Vec::new();
+            while head.len() < 512 {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            let text = String::from_utf8_lossy(&head);
+            if text.starts_with("HTTP/1.0 200") || text.starts_with("HTTP/1.1 200") {
+                return PortProbe::HttpOk;
+            }
+        }
+        return PortProbe::Taken;
+    }
+    // Nothing listening: confirm the port is actually bindable (a non-TCP
+    // owner, permissions, etc. can still refuse it).
+    match std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))) {
+        Ok(_) => PortProbe::Free,
+        Err(_) => PortProbe::Taken,
+    }
+}
+
+/// First bindable port from `requested` upward (at most `GUI_PORT_SCAN_RANGE`
+/// past it). Returns `None` when the whole range is unusable.
+#[cfg(feature = "gui")]
+fn select_gui_port(requested: u16) -> Option<u16> {
+    let end = u32::from(requested) + GUI_PORT_SCAN_RANGE;
+    (u32::from(requested)..=end.min(65535))
+        .map(|p| p as u16)
+        .find(|p| probe_port(*p) == PortProbe::Free)
+}
+
+/// Desktop port handling: avoid the cryptic `Address already in use
+/// (os error 98)` crash that is routine on common ports like 3000.
+///
+/// - A live lock record whose port answers HTTP 200 means *our* server is
+///   already up: exit pointing at it (double-clicking twice must not spawn
+///   a second server).
+/// - Otherwise a taken `PORT` falls through to a nearby free port (gui
+///   only; headless builds keep fail-closed binding), recorded together
+///   with the pid in `<base>/sonicboom.lock` for discovery.
+/// The chosen port is exported back into `PORT` for `AppConfig` and always
+/// reported loudly: the service must never silently move ports.
+#[cfg(feature = "gui")]
+fn ensure_gui_port(base_dir: &std::path::Path) {
+    use std::env;
+
+    let requested: u16 = env::var("PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(17842);
+    let lock_path = base_dir.join(GUI_LOCK_FILE);
+    let env_path = base_dir.join(".env");
+
+    if let Ok(text) = std::fs::read_to_string(&lock_path) {
+        if let Some((old_pid, old_port)) = parse_lock_content(&text) {
+            if probe_port(old_port) == PortProbe::HttpOk {
+                eprintln!(
+                    "SonicBoom is already running (pid {old_pid}) at http://127.0.0.1:{old_port} \
+                     (see '{}'). Stop it first, or delete that file if it is stale and restart.",
+                    lock_path.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let Some(port) = select_gui_port(requested) else {
+        if probe_port(requested) == PortProbe::HttpOk {
+            eprintln!(
+                "Port {requested} is already in use by another application (it answers HTTP on /health). \
+                 Set a different port with PORT=<free-port> in '{}', or stop the other application.",
+                env_path.display()
+            );
+        } else {
+            eprintln!(
+                "No free port in {requested}..={} (scanned {GUI_PORT_SCAN_RANGE} past PORT). \
+                 Set a different port with PORT=<free-port> in '{}'.",
+                requested.saturating_add(GUI_PORT_SCAN_RANGE as u16),
+                env_path.display()
+            );
+        }
+        std::process::exit(1);
+    };
+    if port != requested {
+        eprintln!(
+            "Port {requested} is in use by another application; using {port} instead. \
+             The actual port is recorded in '{}'. To pin a port, set PORT=<port> in '{}'.",
+            lock_path.display(),
+            env_path.display()
+        );
+    }
+    // A stale record is harmless: the next start re-probes before trusting it.
+    let content = format!("pid={} port={port}\n", std::process::id());
+    if std::fs::write(&lock_path, content).is_err() {
+        eprintln!(
+            "Warning: could not write instance lock to '{}'; \
+             double-click detection and port discovery will be unavailable.",
+            lock_path.display()
+        );
+    }
+    // Safe here: still on the main thread before the server thread spawns.
+    unsafe { env::set_var("PORT", port.to_string()) };
 }
 
 #[cfg(feature = "gui")]
@@ -694,7 +854,20 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     });
 
     tracing::info!("Listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "failed to bind {addr}: {e}. \
+                 Another SonicBoom instance may be running, or another app uses port {port}. \
+                 Set a different port with PORT=<free-port> \
+                 (dev: project-root '.env' or `export PORT=...`; \
+                 desktop gui: '.env' next to the executable; \
+                 docker: `-e PORT=...` with a matching `-p` publish)."
+            )
+        } else {
+            anyhow::anyhow!("failed to bind {addr}: {e}")
+        }
+    })?;
 
     // Graceful shutdown on Ctrl+C / SIGTERM
     axum::serve(
@@ -763,14 +936,14 @@ mod gui_env_tests {
         let path = temp_env_path("replace");
         std::fs::write(
             &path,
-            "PORT=3000\nSONICBOOM_ADMIN_PW=old-value\nLOG_LEVEL=info\n",
+            "PORT=17842\nSONICBOOM_ADMIN_PW=old-value\nLOG_LEVEL=info\n",
         )
         .unwrap();
         persist_env_value(&path, "SONICBOOM_ADMIN_PW", "new-value").unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             content,
-            "PORT=3000\nSONICBOOM_ADMIN_PW=new-value\nLOG_LEVEL=info\n"
+            "PORT=17842\nSONICBOOM_ADMIN_PW=new-value\nLOG_LEVEL=info\n"
         );
         // Re-running keeps a single entry (no duplicates).
         persist_env_value(&path, "SONICBOOM_ADMIN_PW", "newer-value").unwrap();
@@ -788,5 +961,45 @@ mod gui_env_tests {
         let pw = crate::auth::token::generate_token_value();
         assert!(pw.chars().count() >= crate::config::MIN_ADMIN_PASSWORD_LEN);
         assert!(pw.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn lock_content_round_trips() {
+        use super::{GUI_LOCK_FILE, parse_lock_content};
+        assert_eq!(GUI_LOCK_FILE, "sonicboom.lock");
+        let text = format!("pid={} port={}\n", std::process::id(), 17843);
+        assert_eq!(parse_lock_content(&text), Some((std::process::id(), 17843)));
+    }
+
+    #[test]
+    fn lock_parse_rejects_garbage() {
+        use super::parse_lock_content;
+        for bad in [
+            "",
+            "pid=abc port=17842\n",
+            "pid=123\n",
+            "port=17842\n",
+            "pid=123 port=not-a-port\n",
+            "pid=123 port=70000\n",
+        ] {
+            assert_eq!(parse_lock_content(bad), None, "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn occupied_port_is_skipped_by_selection() {
+        use super::{PortProbe, probe_port, select_gui_port};
+        // Hold a port so the scanner must skip it.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied = held.local_addr().unwrap().port();
+        assert_ne!(
+            probe_port(occupied),
+            PortProbe::Free,
+            "held port {occupied} looked free"
+        );
+        let picked = select_gui_port(occupied).expect("a free port must exist nearby");
+        assert_ne!(picked, occupied, "scanner did not skip held port");
+        assert_eq!(probe_port(picked), PortProbe::Free);
+        drop(held);
     }
 }
