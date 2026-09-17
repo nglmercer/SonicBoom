@@ -293,18 +293,23 @@ impl AudioManager {
 
 /// The audio thread that handles playback
 fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_queue_items: usize) {
-    // Initialize rodio
-    let (_stream, stream_handle) = match OutputStream::try_default() {
-        Ok(s) => s,
+    // Initialize rodio. A missing output device must not kill playback
+    // forever: servers often boot before audio is available (USB replug,
+    // remote session, service start). The thread stays alive and
+    // `ensure_audio_output` retries lazily whenever playback is attempted,
+    // so recovery needs no process restart.
+    let mut audio_output = match OutputStream::try_default() {
+        Ok((stream, handle)) => Some((stream, handle)),
         Err(e) => {
-            tracing::error!("Failed to initialize audio output: {}", e);
-            return;
+            tracing::warn!("No audio output at startup ({e}); playback will retry when requested");
+            None
         }
     };
 
     let mut queue = AudioQueue::with_max_items(max_queue_items);
     let mut sink: Option<Sink> = None;
     let mut temp_files: HashSet<PathBuf> = HashSet::new();
+    let mut last_stream_retry = std::time::Instant::now();
 
     // Runtime for async operations
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -313,6 +318,22 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
         .unwrap();
 
     loop {
+        // Recovery tick: when the output device was missing, retry on a
+        // throttle (never every 100 ms tick) and start waiting items once
+        // the device appears. A sink implies a stream, so the finished
+        // check below only runs while output exists.
+        if audio_output.is_none() {
+            let now = std::time::Instant::now();
+            if stream_retry_due(last_stream_retry, now) {
+                last_stream_retry = now;
+                ensure_audio_output(&mut audio_output, true);
+            }
+            if audio_output.is_some() && sink.is_none() && !queue.is_paused() {
+                if let Some((_, handle)) = audio_output.as_ref() {
+                    play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
+                }
+            }
+        }
         // Check if current playback finished
         if let Some(s) = &sink
             && s.empty()
@@ -325,8 +346,11 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
             sink = None;
 
             // Try to play next; broken items clean their temp files and
-            // are skipped so one bad file cannot stall the queue.
-            play_next_available(&stream_handle, &mut queue, &mut sink, &mut temp_files);
+            // are skipped so one bad file cannot stall the queue. A sink
+            // implies a live stream, but degrade gracefully regardless.
+            if let Some((_, handle)) = audio_output.as_ref() {
+                play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
+            }
         }
 
         // Use blocking recv with timeout
@@ -343,14 +367,13 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                             continue;
                         }
 
-                        // Auto-play if nothing is currently playing and queue is not paused
+                        // Auto-play if nothing is currently playing and queue is not paused.
+                        // Without an output device the item stays queued and
+                        // the recovery tick starts it once a device appears.
                         if sink.is_none() && !queue.is_paused() {
-                            play_next_available(
-                                &stream_handle,
-                                &mut queue,
-                                &mut sink,
-                                &mut temp_files,
-                            );
+                            if let Some(handle) = ensure_audio_output(&mut audio_output, false) {
+                                play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
+                            }
                         }
                     }
                     AudioCommand::PlayNow { id, path } => {
@@ -363,9 +386,14 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                         sink = None;
 
                         let item = AudioItem { id, path };
-                        if start_playing(&stream_handle, queue.volume(), &mut sink, &item) {
+                        let started =
+                            ensure_audio_output(&mut audio_output, false).is_some_and(|handle| {
+                                start_playing(handle, queue.volume(), &mut sink, &item)
+                            });
+                        if started {
                             queue.set_current(Some(item));
                         } else {
+                            tracing::warn!(path = ?item.path, "PlayNow failed: playback could not start");
                             cleanup_item_temp(&item, &mut temp_files);
                         }
                     }
@@ -379,7 +407,9 @@ fn audio_thread(mut command_rx: tokio::sync::mpsc::Receiver<AudioCommand>, max_q
                             cleanup_item_temp(&interrupted, &mut temp_files);
                         }
 
-                        play_next_available(&stream_handle, &mut queue, &mut sink, &mut temp_files);
+                        if let Some(handle) = ensure_audio_output(&mut audio_output, false) {
+                            play_next_available(handle, &mut queue, &mut sink, &mut temp_files);
+                        }
                     }
                     AudioCommand::Pause => {
                         if let Some(s) = &sink {
@@ -466,26 +496,77 @@ fn play_next_available(
     }
 }
 
+/// How often the idle audio thread retries a missing output device.
+/// Command-driven attempts (enqueue / play-now) always retry immediately;
+/// this only throttles the background tick so a deviceless machine does not
+/// spam one attempt every 100 ms.
+const STREAM_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// True when a background output-device retry is due.
+fn stream_retry_due(last_retry: std::time::Instant, now: std::time::Instant) -> bool {
+    now.duration_since(last_retry) >= STREAM_RETRY_INTERVAL
+}
+
+/// Returns the output handle, initializing the default audio stream when it
+/// is missing (first use, or recovery after the device was unavailable).
+/// `quiet` keeps periodic background retries at debug level; attempts that
+/// back a user command always warn loudly so silence is never mysterious.
+fn ensure_audio_output(
+    slot: &mut Option<(OutputStream, rodio::OutputStreamHandle)>,
+    quiet: bool,
+) -> Option<&rodio::OutputStreamHandle> {
+    if slot.is_none() {
+        match OutputStream::try_default() {
+            Ok((stream, handle)) => {
+                tracing::info!("Audio output initialized");
+                *slot = Some((stream, handle));
+            }
+            Err(error) => {
+                if quiet {
+                    tracing::debug!("Audio output still unavailable: {error}");
+                } else {
+                    tracing::warn!("Audio output unavailable: {error}");
+                }
+                return None;
+            }
+        }
+    }
+    slot.as_ref().map(|(_, handle)| handle)
+}
+
 /// Attempt to start playback of `item` into `sink_slot`.
 ///
 /// Returns `true` when playback started. Any failure (missing file,
-/// undecodable audio, sink creation) returns `false` and the caller must
-/// clean the item's temp file via [`cleanup_item_temp`].
+/// undecodable audio, sink creation) logs loudly and returns `false`; the
+/// caller must clean the item's temp file via [`cleanup_item_temp`].
+/// Silence here used to be total (no logs, HTTP 200 anyway), which made
+/// every playback failure undebuggable from the operator side.
 fn start_playing(
     stream_handle: &rodio::OutputStreamHandle,
     volume: f32,
     sink_slot: &mut Option<Sink>,
     item: &AudioItem,
 ) -> bool {
-    let Ok(file) = File::open(&item.path) else {
-        return false;
+    let file = match File::open(&item.path) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(path = ?item.path, "Playback failed: cannot open audio file: {error}");
+            return false;
+        }
     };
-    let reader = BufReader::new(file);
-    let Ok(source) = Decoder::new(reader) else {
-        return false;
+    let source = match Decoder::new(BufReader::new(file)) {
+        Ok(source) => source,
+        Err(error) => {
+            tracing::warn!(path = ?item.path, "Playback failed: cannot decode audio file: {error:?}");
+            return false;
+        }
     };
-    let Ok(new_sink) = Sink::try_new(stream_handle) else {
-        return false;
+    let new_sink = match Sink::try_new(stream_handle) {
+        Ok(sink) => sink,
+        Err(error) => {
+            tracing::warn!("Playback failed: cannot create audio sink: {error:?}");
+            return false;
+        }
     };
     new_sink.set_volume(volume);
     new_sink.append(source);
@@ -646,6 +727,21 @@ pub fn prepare_temp_dir(dir: &Path) -> std::io::Result<usize> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn stream_retries_are_throttled_to_the_recovery_interval() {
+        let start = std::time::Instant::now();
+        assert!(!stream_retry_due(start, start));
+        assert!(!stream_retry_due(
+            start,
+            start + STREAM_RETRY_INTERVAL - std::time::Duration::from_millis(1)
+        ));
+        assert!(stream_retry_due(start, start + STREAM_RETRY_INTERVAL));
+        assert!(stream_retry_due(
+            start,
+            start + STREAM_RETRY_INTERVAL + std::time::Duration::from_secs(60)
+        ));
+    }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
