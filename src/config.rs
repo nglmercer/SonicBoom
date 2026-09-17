@@ -342,7 +342,10 @@ impl AppConfig {
                 Some(dir) if !dir.trim().is_empty() => {}
                 _ => {
                     return Err(
-                        "ALLOWED_AUDIO_DIR must be set when the playback/filesystem queue is enabled"
+                        "ALLOWED_AUDIO_DIR must be set when the playback/filesystem queue is enabled. \
+                         Set it in '.env' (e.g. ALLOWED_AUDIO_DIR=./audio) and create the directory \
+                         ('mkdir -p audio'), or run headless with \
+                         'cargo run --no-default-features --features server'."
                             .to_string(),
                     );
                 }
@@ -421,7 +424,12 @@ impl AppConfig {
         if self.admin_pw.is_empty() {
             return Err(
                 "SONICBOOM_ADMIN_PW is not set. Refusing to start with no admin password. \
-                 Set SONICBOOM_ADMIN_PW to a strong password (minimum 12 characters)."
+                 Set SONICBOOM_ADMIN_PW to a strong password (minimum 12 characters). \
+                 Config file: create '.env' in the project root (copy from '.env.example'), \
+                 set SONICBOOM_ADMIN_PW there, run 'chmod 600 .env'. \
+                 Generate with: python3 -c 'import secrets; print(secrets.token_urlsafe(24))'. \
+                 Or export it: export SONICBOOM_ADMIN_PW='<generated>'. \
+                 There is intentionally no default password (see SECURITY.md)."
                     .to_string(),
             );
         }

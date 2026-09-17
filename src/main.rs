@@ -54,6 +54,12 @@ use tray_icon::{
 };
 
 fn main() -> anyhow::Result<()> {
+    // Desktop first-run bootstrap (gui builds only): sidecar `.env`,
+    // exe-adjacent data dirs, generated admin password. Headless server
+    // builds keep fail-closed behavior (refuse without explicit password).
+    #[cfg(feature = "gui")]
+    ensure_gui_env();
+
     // Load environment variables from .env file
     dotenvy::dotenv().ok();
 
@@ -111,6 +117,177 @@ fn main() -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(run_server(config))
     }
+}
+
+/// First-run bootstrap for desktop (`gui`) builds so a basic user can
+/// double-click the app with no terminal and no exported environment.
+///
+/// Headless server builds intentionally fail closed when `SONICBOOM_ADMIN_PW`
+/// is missing (see `config::AppConfig::validate`). A GUI app has no console
+/// (Windows hides it via `#![windows_subsystem]`), so that failure looks
+/// like an instant silent crash. For `gui` builds only this function:
+/// 1. loads a sidecar `.env` next to the executable (in addition to the
+///    CWD `.env`), so a double-clicked app finds its config;
+/// 2. defaults data dirs (`TOKEN_STORE_PATH`, `MODEL_CACHE_DIR`, `LOG_DIR`,
+///    `TEMP_AUDIO_DIR`, plus `ALLOWED_AUDIO_DIR` with `playback`) to
+///    exe-adjacent locations when unset, creating them best-effort;
+/// 3. generates a random 256-bit admin password on first run and persists
+///    it to that sidecar `.env` (`0600` on Unix) when `SONICBOOM_ADMIN_PW`
+///    is still missing. This is a unique per-install secret, never a
+///    well-known default, so the password policy still holds. The value
+///    itself is never logged; only the file path is reported.
+///
+/// Explicitly-set environment variables always win: nothing here overrides
+/// an existing non-empty value.
+#[cfg(feature = "gui")]
+fn ensure_gui_env() {
+    use std::env;
+
+    // Base directory: executable's parent, falling back to the CWD.
+    let base_dir: std::path::PathBuf = env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    // Load configs: CWD `.env` first, then the exe-adjacent sidecar (which
+    // only fills in variables the process env / CWD file did not set).
+    dotenvy::dotenv().ok();
+    let sidecar_env = base_dir.join(".env");
+    dotenvy::from_path(&sidecar_env).ok();
+
+    // Set `name` only when currently unset or blank.
+    let set_default = |name: &str, value: String| {
+        let missing = env::var(name)
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true);
+        if missing {
+            // Safe here: called on the main thread before any other threads
+            // are spawned (`ensure_gui_env` runs first in `main`).
+            unsafe { env::set_var(name, value) };
+        }
+    };
+
+    // Exe-adjacent data dirs so double-click runs don't depend on the CWD
+    // (which for a GUI launch is unpredictable and may not be writable).
+    let dir_default = |name: &str, leaf: &str, create: bool| {
+        let path = base_dir.join(leaf);
+        if create {
+            let _ = std::fs::create_dir_all(&path);
+        }
+        if let Some(s) = path.to_str() {
+            set_default(name, s.to_string());
+        }
+    };
+
+    dir_default("MODEL_CACHE_DIR", "models", true);
+    dir_default("LOG_DIR", "logs", true);
+    dir_default("TEMP_AUDIO_DIR", "temp_audio", true);
+    // Token store is a file, not a dir: default the path, don't create it
+    // here (`TokenStore::load` creates it with restrictive permissions).
+    if let Some(s) = base_dir.join("tokens.json").to_str() {
+        set_default("TOKEN_STORE_PATH", s.to_string());
+    }
+    #[cfg(feature = "playback")]
+    dir_default("ALLOWED_AUDIO_DIR", "audio", true);
+
+    // First run: no admin password anywhere -> generate + persist.
+    let pw_missing = env::var("SONICBOOM_ADMIN_PW")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true);
+    if !pw_missing {
+        return;
+    }
+
+    let generated = crate::auth::token::generate_token_value();
+    // Persist to the sidecar `.env` (fall back to `./.env`), updating an
+    // existing assignment in place so re-runs keep a single entry.
+    let mut target = sidecar_env.clone();
+    if persist_env_value(&target, "SONICBOOM_ADMIN_PW", &generated).is_err() {
+        target = std::path::PathBuf::from(".env");
+        if persist_env_value(&target, "SONICBOOM_ADMIN_PW", &generated).is_err() {
+            // Last resort: in-memory only for this run (the password changes
+            // next restart). Still better than a silent exit for a GUI user.
+            eprintln!(
+                "Warning: could not write generated SONICBOOM_ADMIN_PW to '{}' or './.env'; \
+                 using an in-memory password for this run only.",
+                sidecar_env.display()
+            );
+        }
+    }
+    // Safe here: still on the main thread before the server thread spawns.
+    unsafe { env::set_var("SONICBOOM_ADMIN_PW", &generated) };
+    eprintln!(
+        "Generated a random admin password and saved it to '{}'. \
+         Open that file to sign in to /admin (the tray menu 'Open File Directory' shows the folder). \
+         The password itself is never logged.",
+        target.display()
+    );
+}
+
+/// Insert or replace `key=value` in the `.env` file at `path`, creating it
+/// (and parents) as needed. Restricts permissions to `0600` on Unix.
+#[cfg(feature = "gui")]
+fn persist_env_value(
+    path: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let assignment = format!("{key}={value}");
+    let merged = match std::fs::read_to_string(path) {
+        Ok(existing) => {
+            let mut replaced = false;
+            let mut lines: Vec<String> = Vec::new();
+            for line in existing.lines() {
+                let trimmed = line.trim_start();
+                let key_line = trimmed == key
+                    || trimmed.starts_with(&format!("{key}="))
+                    || trimmed.starts_with(&format!("{key} "));
+                if !replaced && key_line {
+                    // Preserve an `export ` prefix style if the user used it.
+                    if trimmed.starts_with("export ") {
+                        lines.push(format!("export {assignment}"));
+                    } else {
+                        lines.push(assignment.clone());
+                    }
+                    replaced = true;
+                } else {
+                    lines.push(line.to_string());
+                }
+            }
+            if !replaced {
+                lines.push(assignment);
+            }
+            let mut out = lines.join("\n");
+            out.push('\n');
+            out
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!("{assignment}\n"),
+        Err(e) => return Err(e),
+    };
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(merged.as_bytes())?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "gui")]
@@ -238,7 +415,11 @@ fn run_linux_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::R
             tracing::info!("System tray running (StatusNotifierItem)");
             loop {
                 if let Ok(err_msg) = server_err_rx.try_recv() {
+                    // Fatal: token store / trust / bind failure. A lingering
+                    // tray with a dead server is worse than a visible exit.
                     tracing::error!("Server thread died: {err_msg}");
+                    eprintln!("Server error: {err_msg}");
+                    std::process::exit(1);
                 }
                 if handle.is_closed() {
                     tracing::info!("Tray service closed; shutting down");
@@ -254,6 +435,8 @@ fn run_linux_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::R
             loop {
                 if let Ok(err_msg) = server_err_rx.try_recv() {
                     tracing::error!("Server thread died: {err_msg}");
+                    eprintln!("Server error: {err_msg}");
+                    std::process::exit(1);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(5));
             }
@@ -293,11 +476,13 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
         // are never missed. This is a tray-only app so CPU usage is negligible.
         *control_flow = ControlFlow::Poll;
 
-        // Check if the server thread reported a fatal error
+        // A server-thread error is fatal (token store / trust / bind
+        // failure): exit visibly instead of lingering as a tray with a
+        // dead server behind it.
         if let Ok(err_msg) = server_err_rx.try_recv() {
             tracing::error!("Server thread died: {err_msg}");
-            // Optionally exit, or just log — here we keep the tray alive
-            // so the user can still interact with the app.
+            eprintln!("Server error: {err_msg}");
+            std::process::exit(1);
         }
 
         match event {
@@ -310,7 +495,19 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
                     builder = builder.with_icon(i);
                 }
 
-                tray_icon = Some(builder.build().unwrap());
+                // Never panic here: tray creation can fail (e.g. no tray
+                // host), and a panic is an undebuggable crash for a basic
+                // user. Fall back to running the server without an icon.
+                match builder.build() {
+                    Ok(built) => {
+                        tray_icon = Some(built);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "System tray unavailable ({e}); running without a tray icon"
+                        );
+                    }
+                }
             }
 
             tao::event::Event::MainEventsCleared => {
@@ -533,5 +730,63 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => tracing::info!("Received Ctrl+C, shutting down..."),
         () = terminate => tracing::info!("Received SIGTERM, shutting down..."),
+    }
+}
+
+#[cfg(all(test, feature = "gui"))]
+mod gui_env_tests {
+    use super::persist_env_value;
+
+    fn temp_env_path(tag: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "sonicboom-gui-env-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(".env")
+    }
+
+    #[test]
+    fn creates_new_env_file_with_assignment() {
+        let path = temp_env_path("create");
+        let _ = std::fs::remove_file(&path);
+        persist_env_value(&path, "SONICBOOM_ADMIN_PW", "secret-value").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "SONICBOOM_ADMIN_PW=secret-value\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn replaces_existing_assignment_and_keeps_other_lines() {
+        let path = temp_env_path("replace");
+        std::fs::write(
+            &path,
+            "PORT=3000\nSONICBOOM_ADMIN_PW=old-value\nLOG_LEVEL=info\n",
+        )
+        .unwrap();
+        persist_env_value(&path, "SONICBOOM_ADMIN_PW", "new-value").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content,
+            "PORT=3000\nSONICBOOM_ADMIN_PW=new-value\nLOG_LEVEL=info\n"
+        );
+        // Re-running keeps a single entry (no duplicates).
+        persist_env_value(&path, "SONICBOOM_ADMIN_PW", "newer-value").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.matches("SONICBOOM_ADMIN_PW=").count(),
+            1,
+            "duplicate entries: {content:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn generated_password_satisfies_policy() {
+        let pw = crate::auth::token::generate_token_value();
+        assert!(pw.chars().count() >= crate::config::MIN_ADMIN_PASSWORD_LEN);
+        assert!(pw.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

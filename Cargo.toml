@@ -5,6 +5,7 @@ edition = "2024"
 description = "High-performance web server that generates Text-to-Speech audio using the Supertonic 3 ONNX model."
 license = "MIT"
 repository = "https://github.com/nglmercer/SonicBoom"
+default-run = "SonicBoom"
 
 [lib]
 name = "sonicboom"
