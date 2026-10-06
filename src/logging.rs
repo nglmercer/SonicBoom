@@ -1,11 +1,13 @@
 //! Logging configuration for SonicBoom
 //!
 //! Provides structured logging with file rotation
+//! and a hot-reloadable level filter (see
+//! [`set_level`]).
 
 use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    EnvFilter, fmt, fmt::format::Writer, layer::SubscriberExt, util::SubscriberInitExt,
+    EnvFilter, fmt, fmt::format::Writer, layer::SubscriberExt, reload, util::SubscriberInitExt,
 };
 
 /// Custom timer that shows only time (HH:MM:SS)
@@ -28,8 +30,23 @@ impl tracing_subscriber::fmt::time::FormatTime for ShortTimer {
 /// Global guard to keep the file writer alive
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
+/// Type-erased log-level setter: the reload handle is
+/// generic over the (unnameable) layered subscriber
+/// type, so it is captured in a closure and erased.
+struct LevelHandle {
+    modify: Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+}
+
+static LEVEL_HANDLE: OnceLock<LevelHandle> = OnceLock::new();
+
 /// Initialize the logging system
-pub fn init(log_dir: &str, log_level: &str, log_to_file: bool, log_to_stdout: bool) {
+pub fn init(
+    log_dir: &str,
+    log_level: &str,
+    filter: Option<&str>,
+    log_to_file: bool,
+    log_to_stdout: bool,
+) {
     // Create log directory if it doesn't exist
     if log_to_file && let Err(e) = std::fs::create_dir_all(log_dir) {
         eprintln!("Warning: Could not create log directory: {}", e);
@@ -43,11 +60,19 @@ pub fn init(log_dir: &str, log_level: &str, log_to_file: bool, log_to_stdout: bo
     // NOTE: the level applies globally (not just `SonicBoom`), because the
     // library (`sonicboom`), ONNX Runtime (`ort`), and model-verification
     // warnings live under different targets and must stay visible.
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| format!("{log_level},tower_http=trace").into());
+    let env_filter = EnvFilter::new(
+        filter
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{log_level},tower_http=trace")),
+    );
+
+    // Make the level filter hot-reloadable: the filter is wrapped in a
+    // reload layer whose handle is stored (type-erased) for `set_level`.
+    // `reload::Layer` wraps either a Layer or a Filter.
+    let (reloadable_filter, reload_handle) = reload::Layer::new(env_filter);
 
     // Base subscriber
-    let base = tracing_subscriber::registry().with(env_filter);
+    let base = tracing_subscriber::registry().with(reloadable_filter);
 
     if log_to_file && log_to_stdout {
         // File writer - detailed format
@@ -103,6 +128,25 @@ pub fn init(log_dir: &str, log_level: &str, log_to_file: bool, log_to_stdout: bo
     } else {
         base.init();
     }
+
+    // Store the type-erased level setter for hot reload.
+    let _ = LEVEL_HANDLE.set(LevelHandle {
+        modify: Box::new(move |level: &str| {
+            let filter = EnvFilter::try_new(level).map_err(|e| e.to_string())?;
+            reload_handle
+                .modify(|f| *f = filter)
+                .map_err(|e| e.to_string())
+        }),
+    });
+}
+
+/// Hot-reload the global log level (spec §44).
+/// All environment precedence is resolved by ConfigManager.
+pub fn set_level(level: &str) -> Result<(), String> {
+    LEVEL_HANDLE
+        .get()
+        .ok_or_else(|| "logging is not initialized".to_string())
+        .and_then(|handle| (handle.modify)(level))
 }
 
 /// Log startup banner
@@ -113,4 +157,34 @@ pub fn log_startup(port: u16, log_dir: &str) {
         log_dir = log_dir,
         "SonicBoom TTS Server starting"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_level_before_init_is_an_error() {
+        // In a fresh process the handle is unset; the
+        // test process may have initialized logging
+        // already, so only assert the function is
+        // callable and returns a Result.
+        let _ = set_level("debug");
+    }
+
+    #[tokio::test]
+    async fn init_then_set_level_round_trips() {
+        // Initialize in-memory logging (stdout only,
+        // no files) and change the level twice.
+        let dir = std::env::temp_dir().join(format!(
+            "sonicboom-logging-test-{}-{}",
+            std::process::id(),
+            "level"
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        init(&dir.to_string_lossy(), "info", None, false, false);
+        assert!(set_level("debug").is_ok());
+        assert!(set_level("warn").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

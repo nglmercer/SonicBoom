@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::AppState;
+use crate::config::AuthMode;
 
 pub struct AuthenticatedToken(#[allow(dead_code)] pub String);
 
@@ -47,9 +48,26 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // If auth is not required, allow all requests
-        if !state.config.auth_required {
-            return Ok(AuthenticatedToken("__no_auth__".to_string()));
+        // The authentication mode is read live from the
+        // configuration so `auth_mode` changes apply
+        // without a restart (spec §30).
+        let config = state.config.get().await;
+        match config.server.auth_mode {
+            // `local` and `none` do not require API
+            // bearer authentication.
+            AuthMode::Local => {
+                let peer = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>();
+                if !peer.is_some_and(|peer| peer.0.ip().is_loopback()) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                return Ok(AuthenticatedToken("__no_auth__".to_string()));
+            }
+            AuthMode::None => {
+                return Ok(AuthenticatedToken("__no_auth__".to_string()));
+            }
+            AuthMode::Token => {}
         }
 
         let token_value = parts
@@ -59,7 +77,7 @@ impl FromRequestParts<AppState> for AuthenticatedToken {
             .and_then(parse_bearer)
             .ok_or(StatusCode::UNAUTHORIZED)?;
 
-        if state.config.enable_sample_token && token_value == "SAMPLE_TOKEN" {
+        if config.admin.enable_sample_token && token_value == "SAMPLE_TOKEN" {
             return Ok(AuthenticatedToken(token_value));
         }
 
@@ -78,7 +96,11 @@ mod tests {
         AppState,
         api::{gate::InferenceGate, rate_limit::RateLimiter},
         auth::store::TokenStore,
-        config::AppConfig,
+        config::{AppConfig, AuthMode, ConfigManager, secrets::MemorySecretStore},
+        runtime::{
+            ModelService,
+            subsystems::{InferenceGateManager, RateLimiterManager},
+        },
         tts::ModelStatus,
     };
     use axum::{
@@ -89,52 +111,19 @@ mod tests {
     use tokio::sync::RwLock;
 
     fn test_state(enable_sample_token: bool) -> AppState {
+        let mut config = AppConfig::default();
+        config.server.auth_mode = AuthMode::Token;
+        config.admin.enable_sample_token = enable_sample_token;
+        config.paths.audio = Some("/tmp".to_string());
         AppState {
             model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
             token_store: Arc::new(TokenStore::empty()),
-            config: Arc::new(AppConfig {
-                admin_id: "admin".to_string(),
-                admin_pw: "long-enough-test-password".to_string(),
-                enable_sample_token,
-                token_store_path: String::new(),
-                model_cache_dir: String::new(),
-                model_revision: "test".to_string(),
-                model_hashes_path: None,
-                hf_token: None,
-                inference_steps: 5,
-                port: 17842,
-                log_dir: String::new(),
-                log_level: "info".to_string(),
-                log_to_file: false,
-                log_to_stdout: false,
-                auth_required: true,
-                allowed_audio_dir: Some("/tmp".to_string()),
-                max_text_length: 10_000,
-                request_timeout_secs: 5,
-                max_concurrent_inference: 1,
-                max_pending_inference: 8,
-                max_chunk_chars: 200,
-                tts_rate_limit_requests: 0,
-                tts_rate_limit_window_secs: 60,
-                tts_rate_limit_burst: 300,
-                audio_output_device: "default".to_string(),
-                tts_max_body_bytes: 65_536,
-                openai_max_body_bytes: 65_536,
-                queue_max_body_bytes: 16_384,
-                admin_max_body_bytes: 16_384,
-                trust_proxy: false,
-                trusted_proxies: vec![],
-                cookie_secure: false,
-                admin_session_expiry_secs: 60,
-                temp_audio_dir: "./temp_audio".to_string(),
-                enable_hsts: false,
-                max_playback_queue_items: 100,
-                model_download_connect_timeout_secs: 10,
-                model_download_timeout_secs: 1800,
-            }),
+            config: ConfigManager::in_memory(config),
             audio_manager: Arc::new(None),
-            inference_gate: Arc::new(InferenceGate::new(1, 8)),
-            rate_limiter: Arc::new(RateLimiter::new(0, 60)),
+            inference_gate: Arc::new(InferenceGateManager::new(InferenceGate::new(1, 8))),
+            rate_limiter: Arc::new(RateLimiterManager::new(RateLimiter::new(0, 60))),
+            model_service: Arc::new(ModelService::new(Arc::new(RwLock::new(ModelStatus::Idle)))),
+            secrets: Arc::new(MemorySecretStore::default()),
         }
     }
 
@@ -146,6 +135,29 @@ mod tests {
             .unwrap()
             .into_parts()
             .0
+    }
+
+    #[tokio::test]
+    async fn local_auth_rejects_remote_peers_even_before_listener_restart() {
+        let state = test_state(false);
+        state
+            .config
+            .update(None, |c| c.server.auth_mode = AuthMode::Local)
+            .await
+            .unwrap();
+        for address in ["127.0.0.1:1234", "[::1]:1234", "192.0.2.1:1234"] {
+            let mut parts = parts_with_auth("Bearer unused");
+            let peer: std::net::SocketAddr = address.parse().unwrap();
+            parts.extensions.insert(axum::extract::ConnectInfo(peer));
+            let result = AuthenticatedToken::from_request_parts(&mut parts, &state).await;
+            assert_eq!(result.is_ok(), peer.ip().is_loopback());
+        }
+        let mut parts = parts_with_auth("Bearer unused");
+        assert!(
+            AuthenticatedToken::from_request_parts(&mut parts, &state)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

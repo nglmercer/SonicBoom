@@ -140,6 +140,13 @@ impl AudioQueue {
         self.paused = paused;
     }
 
+    /// Update the queue bound. Existing items are
+    /// never dropped to enforce a smaller cap; the
+    /// new bound applies to future admissions.
+    pub fn set_max_items(&mut self, max_items: usize) {
+        self.max_items = max_items.max(1);
+    }
+
     /// Check if playback is paused
     pub fn is_paused(&self) -> bool {
         self.paused
@@ -195,6 +202,11 @@ pub enum AudioCommand {
     Stop,
     /// Set volume
     SetVolume(f32),
+    /// Update the queue bound (hot config reload).
+    SetMaxQueueItems {
+        max_items: usize,
+        reply: oneshot::Sender<()>,
+    },
     /// Register a temp file for cleanup after playback
     RegisterTemp { path: PathBuf },
     /// Get status (returns sender for response)
@@ -339,7 +351,24 @@ impl AudioManager {
         self.command_tx
             .send(AudioCommand::SetVolume(volume))
             .await
-            .map_err(|_| AudioManagerError::Unavailable)
+            .map_err(|_| AudioManagerError::Unavailable)?;
+        Ok(())
+    }
+
+    /// Update the queue bound at runtime (hot
+    /// configuration reload). Existing items are
+    /// never dropped; the new bound applies to
+    /// future admissions.
+    pub async fn set_max_queue_items(&self, max_items: usize) -> Result<(), AudioManagerError> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(AudioCommand::SetMaxQueueItems {
+                max_items,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| AudioManagerError::Unavailable)?;
+        rx.await.map_err(|_| AudioManagerError::Unavailable)
     }
 
     /// Register a temporary file for automatic cleanup after playback completes.
@@ -624,6 +653,10 @@ fn audio_thread(
                             s.set_volume(vol);
                         }
                         queue.set_volume(vol);
+                    }
+                    AudioCommand::SetMaxQueueItems { max_items, reply } => {
+                        queue.set_max_items(max_items);
+                        let _ = reply.send(());
                     }
                     AudioCommand::RegisterTemp { path } => {
                         temp_files.insert(path);

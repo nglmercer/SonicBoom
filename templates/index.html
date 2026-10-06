@@ -11,8 +11,8 @@
   <h1>SonicBoom TTS</h1>
   <div class="model-status" id="modelStatus" STATUS_HIDDEN>STATUS_MSG</div>
 
-  <div class="form-group">
-    <label for="apiToken">API Token (required — create one in the <a href="/admin">admin panel</a>)</label>
+  <div class="form-group" id="tokenGroup">
+    <label for="apiToken">API Token (create one in the <a href="/admin">admin panel</a>)</label>
     <input type="password" id="apiToken" placeholder="Paste your API token here" autocomplete="off" spellcheck="false">
   </div>
 
@@ -71,6 +71,26 @@
   <button id="btn" BTN_DISABLED>Generate Speech</button>
   <div id="status"></div>
   <audio id="player" controls></audio>
+
+  <details id="configuration">
+    <summary>Configuration</summary>
+    <p id="configStatus" role="status">Loading configuration…</p>
+    <p>Config file: <code id="configPath"></code></p>
+    <button type="button" id="configOpen" hidden>Open config file</button>
+    <button type="button" id="configRefresh">Refresh</button>
+    <button type="button" id="configReload">Reload file</button>
+    <button type="button" id="configValidate">Validate file</button>
+    <form id="configForm">
+      <label for="configSetting">Setting</label>
+      <select id="configSetting"></select>
+      <p id="configDescription"></p>
+      <label for="configValue">Configured value</label>
+      <input id="configValue">
+      <p id="configApply"></p>
+      <button type="submit">Save setting</button>
+    </form>
+    <pre id="configError" role="alert"></pre>
+  </details>
 
   <p class="footer">
     Powered by <a href="https://huggingface.co/Supertone/supertonic-3" target="_blank" rel="noopener">Supertonic 3</a>

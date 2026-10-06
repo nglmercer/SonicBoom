@@ -11,7 +11,7 @@ This README serves as an index to all SonicBoom documentation:
 | [API Reference](docs/api.md)            | Complete API documentation          |
 | [OpenAI-Compatible API](docs/openai.md) | OpenAI TTS API compatible endpoints |
 | [Admin Panel](docs/admin.md)            | Admin panel guide                   |
-| [Configuration](docs/config.md)         | Environment variables and settings  |
+| [Configuration](docs/config.md)         | TOML, first-run setup and live settings |
 | [Security](SECURITY.md)                   | Security policy and credential rotation |
 
 ---
@@ -39,23 +39,35 @@ cargo build --release --features gui
 
 ### Run
 
+Desktop builds open a first-run setup wizard. No `.env` file is needed:
+
 ```bash
-# Set environment variables (admin password is REQUIRED, 12+ chars).
-# Generate one — never reuse a documented placeholder:
-#   python3 -c 'import secrets; print(secrets.token_urlsafe(24))'
+cargo run --release --features gui
+```
+
+Choose local or LAN mode, an audio output, model storage, and admin
+credentials. Local mode binds loopback without an API token. LAN mode
+requires bearer authentication and shows its initial token once.
+Configuration lives in the platform application directory as `config.toml`.
+
+For an unattended server, keep using environment variables:
+
+```bash
 export PORT=17842
+export BIND=127.0.0.1       # use 0.0.0.0 for deliberate LAN exposure
 export SONICBOOM_ADMIN_ID=admin
 export SONICBOOM_ADMIN_PW=<GENERATE-A-RANDOM-PASSWORD>
-export ALLOWED_AUDIO_DIR=./audio   # required for playback builds
-
-# Run the server
+export ALLOWED_AUDIO_DIR=./audio
 cargo run --release
 ```
 
-> The server refuses to start without `SONICBOOM_ADMIN_PW`. API tokens are
-> stored as hashes in `tokens.json` (see `tokens.example.json`); create the
-> file with `printf '[]\n' > tokens.json` if needed, then mint tokens in the
-> admin panel (`/admin`). The admin panel shows each new token exactly once.
+Use a unique password of at least 12 characters. API token hashes remain
+in `tokens.json`, which is initialized safely when missing. The admin panel
+(`/admin`) displays each newly created token once.
+
+Edit `config.toml` or use `SonicBoom config set` to apply settings live.
+See the [configuration guide](docs/config.md) for location overrides,
+revisions, migration, source tracking and runtime apply status.
 
 The server will:
 
@@ -182,7 +194,10 @@ curl -X POST http://localhost:17842/v1/audio/speech \
 SonicBoom/
 ├── src/
 │   ├── main.rs              # Application entry point
-│   ├── config.rs            # Configuration management
+│   ├── config/             # Central ConfigManager, TOML, validation and watcher
+│   ├── runtime/            # Subsystems and live reconfiguration
+│   ├── server/             # Restartable HTTP listener
+│   ├── setup/              # First-run wizard
 │   ├── error.rs             # Error types
 │   ├── logging.rs           # Logging setup
 │   ├── admin/               # Admin panel

@@ -29,6 +29,9 @@ pub async fn get_ready(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn get_index(State(state): State<AppState>) -> Response {
+    if !state.config.get().await.setup_complete {
+        return axum::response::Redirect::to("/setup").into_response();
+    }
     // Collect available voices
     let voices: Vec<String> = {
         let status = state.model_status.read().await;

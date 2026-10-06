@@ -1,6 +1,105 @@
 # Configuration Guide
 
-SonicBoom can be configured via environment variables.
+SonicBoom uses a persistent `config.toml` and one shared `ConfigManager`
+for the browser wizard, settings screen, REST API, CLI and filesystem
+reloads. Environment variables remain supported for Docker, systemd and CI.
+
+## First launch and configuration location
+
+GUI builds open the setup browser on first launch. Open `/setup` manually
+if necessary (the home page redirects there until setup
+is complete). Choose local or token-authenticated LAN access, explicitly
+select an audio output, choose model storage and inference steps, and set
+an admin password. Setup checks that model storage is writable. The
+bootstrap listener uses `127.0.0.1` and local authentication.
+
+Default configuration locations:
+
+- Linux: `$XDG_CONFIG_HOME/sonicboom/config.toml`, or `~/.config/sonicboom/config.toml`.
+- Windows: `%APPDATA%\SonicBoom\config.toml`.
+- macOS: `~/Library/Application Support/SonicBoom/config.toml`.
+
+Set `SONICBOOM_CONFIG` to an explicit path. An existing executable-adjacent
+`config.toml` selects portable mode. Related bootstrap directories and the
+restricted `secrets.json` store live beside the configuration.
+
+With no TOML file, an existing `.env` is migrated automatically. Malformed
+known values reject migration. Passwords and HuggingFace credentials are
+moved to the restricted secret store and never serialized to TOML. Keep the
+legacy file private until you remove it yourself. A headless installation
+with a valid `SONICBOOM_ADMIN_PW` can start unattended without the wizard.
+Docker images bind inside the container on `0.0.0.0`, retain token auth,
+and use `/app/data/config.toml`; host exposure remains controlled by Docker.
+
+## Live changes
+
+Edit `config.toml`, use the Configuration section in the browser, or run:
+
+```sh
+SonicBoom config path
+SonicBoom config get server.port
+SonicBoom config set audio.output_device "CABLE Input"
+SonicBoom config set server.port 19000 --expected-revision 44
+SonicBoom config list
+SonicBoom config effective
+SonicBoom config schema
+SonicBoom config validate
+SonicBoom config reload
+SonicBoom config status
+```
+
+Internal commits use a transaction lock, a cooperating filesystem lock,
+validation, a temporary file, fsync and atomic rename. Concurrent stale
+writers return a conflict. Native notifications are debounced by 400 ms;
+content polling also detects changes on filesystems that omit notifications.
+Invalid runtime edits preserve the last valid configuration and appear in
+configuration status. Invalid persisted configuration rejects startup.
+
+Effective precedence is runtime overrides, environment, TOML, then compiled
+defaults. Persistent updates do not save environment or runtime overlays.
+`config effective` reports each value and its source. Legacy `RUST_LOG`
+directives are represented by the optional `logging.filter` setting, with
+environment provenance. This filter overrides the basic logging level.
+
+Audio, volume, logging level, text limits, inference steps and rate limits
+apply live. Bind/port, body limits, request timeout and session cookie settings
+restart only the HTTP listener. A new bind is acquired before releasing the
+old listener; a failed bind preserves the working address. Admin sessions
+survive listener restarts. Model replacements load in the background before swapping out the
+working model, so other hot changes continue while a download runs.
+Pending replacements appear in `pending_applies`; superseded candidates
+do not replace the working model. Changes to log sinks, log directory or token-store location
+are marked as requiring a process restart.
+
+## Configuration API
+
+`GET /api/info` publicly describes authentication and features. Configuration
+endpoints use the same authentication as TTS:
+
+- `GET /api/config`: persisted safe values and revision.
+- `PATCH /api/config`: partial `changes`, with optional `expected_revision`.
+- `GET /api/config/schema`: types, limits, descriptions and apply strategies.
+- `GET /api/config/effective`: effective values and their sources.
+- `GET /api/config/status`: path, watcher, last error and apply failures.
+- `POST /api/config/reload`: reload and validate the file.
+- `POST /api/config/validate`: validate without installing changes.
+
+A successful PATCH acknowledges persistence. Its change status is `pending`
+until runtime application; consult `/api/config/status` for failures. Audio
+output POSTs follow this same commit-then-apply flow and retain their existing
+`device` and `resolved_name` fields. A configured device may differ from the
+active one after a hardware failure.
+
+Local authentication always requires loopback binding and a loopback peer.
+Token mode permits remote binding. Unauthenticated remote mode requires
+`security.allow_insecure_remote = true`. Unknown TOML keys are rejected,
+including nested typos and attempts to put credentials in configuration.
+
+CLI commands operate on the file through ConfigManager; the running process
+observes those commits through its watcher. CLI status, effective and reload commands prefer the running application.
+For token mode, set `SONICBOOM_API_TOKEN` in the CLI environment. If no server
+is reachable at the configured address, these commands use an offline manager;
+its watcher is inactive.
 
 Security-sensitive misconfiguration fails closed: the server refuses to
 start rather than falling back to insecure behavior.

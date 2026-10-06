@@ -140,12 +140,14 @@ pub async fn post_speech(
     let format = audio::AudioFormat::parse(&request.response_format)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
+    // TTS limits are read per request (spec §46).
+    let config = state.config.get().await;
     sonicboom::engine::validate_tts_input(
         &request.input,
         "en",
         &request.voice,
-        state.config.inference_steps,
-        state.config.max_text_length,
+        config.model.inference_steps,
+        config.tts.max_text_length,
     )
     .map_err(|e| AppError::BadRequest(e.to_string()))?;
 

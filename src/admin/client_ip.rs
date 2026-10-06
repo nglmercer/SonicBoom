@@ -16,7 +16,7 @@ use crate::config::AppConfig;
 /// first untrusted valid IP is the client. An attacker-supplied leftmost
 /// entry can therefore never be selected while a real chain exists.
 pub fn client_ip(headers: &HeaderMap, peer: SocketAddr, config: &AppConfig) -> IpAddr {
-    if config.trust_proxy
+    if config.security.trust_proxy
         && is_trusted_proxy(peer.ip(), config)
         && let Some(forwarded) = forwarded_client_ip(headers, config)
     {
@@ -27,6 +27,7 @@ pub fn client_ip(headers: &HeaderMap, peer: SocketAddr, config: &AppConfig) -> I
 
 fn is_trusted_proxy(peer: IpAddr, config: &AppConfig) -> bool {
     config
+        .security
         .trusted_proxies
         .iter()
         .any(|entry| proxy_entry_contains(entry, peer))
@@ -90,7 +91,7 @@ fn forwarded_client_ip(headers: &HeaderMap, config: &AppConfig) -> Option<IpAddr
         // first untrusted address. Spoofed leftmost entries are unreachable
         // while the real chain is intact.
         for ip in chain.iter().rev() {
-            if !config.trusted_proxies.iter().any(|entry| {
+            if !config.security.trusted_proxies.iter().any(|entry| {
                 entry
                     .parse::<IpAddr>()
                     .map(|addr| addr == *ip)
@@ -175,46 +176,10 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn config_with(trust_proxy: bool, trusted: &[&str]) -> AppConfig {
-        AppConfig {
-            admin_id: "admin".to_string(),
-            admin_pw: "long-enough-password".to_string(),
-            enable_sample_token: false,
-            token_store_path: String::new(),
-            model_cache_dir: String::new(),
-            model_revision: String::new(),
-            model_hashes_path: None,
-            hf_token: None,
-            inference_steps: 5,
-            port: 17842,
-            log_dir: String::new(),
-            log_level: "info".to_string(),
-            log_to_file: false,
-            log_to_stdout: true,
-            auth_required: true,
-            allowed_audio_dir: None,
-            max_text_length: 100,
-            request_timeout_secs: 1,
-            max_concurrent_inference: 1,
-            max_pending_inference: 1,
-            max_chunk_chars: 10,
-            tts_rate_limit_requests: 1,
-            tts_rate_limit_window_secs: 1,
-            tts_rate_limit_burst: 1,
-            audio_output_device: "default".to_string(),
-            tts_max_body_bytes: 1024,
-            openai_max_body_bytes: 1024,
-            queue_max_body_bytes: 1024,
-            admin_max_body_bytes: 1024,
-            trust_proxy,
-            trusted_proxies: trusted.iter().map(|s| s.to_string()).collect(),
-            cookie_secure: false,
-            admin_session_expiry_secs: 60,
-            temp_audio_dir: "./temp_audio".to_string(),
-            enable_hsts: false,
-            max_playback_queue_items: 100,
-            model_download_connect_timeout_secs: 10,
-            model_download_timeout_secs: 1800,
-        }
+        let mut config = AppConfig::default();
+        config.security.trust_proxy = trust_proxy;
+        config.security.trusted_proxies = trusted.iter().map(|s| s.to_string()).collect();
+        config
     }
 
     fn peer() -> SocketAddr {

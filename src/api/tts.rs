@@ -27,8 +27,12 @@ pub(super) async fn synthesize_bounded(
     lang: String,
     voice_name: String,
 ) -> Result<Vec<f32>, AppError> {
-    let inference_steps = state.config.inference_steps;
-    let max_chunk_chars = state.config.max_chunk_chars;
+    // Inference settings are read per request so
+    // configuration changes apply immediately
+    // (spec §46/§47).
+    let config = state.config.get().await;
+    let inference_steps = config.model.inference_steps;
+    let max_chunk_chars = config.tts.max_chunk_chars;
     state
         .inference_gate
         .run_bounded(move || {
@@ -144,12 +148,14 @@ pub async fn post_tts(
     check_rate_limit(&state, &token)?;
     let lang = query.lang.clone().unwrap_or_else(|| "en".to_string());
     let voice = query.voice.clone().unwrap_or_else(|| "M1".to_string());
+    // TTS limits are read per request (spec §46).
+    let config = state.config.get().await;
     sonicboom::engine::validate_tts_input(
         &body,
         &lang,
         &voice,
-        state.config.inference_steps,
-        state.config.max_text_length,
+        config.model.inference_steps,
+        config.tts.max_text_length,
     )
     .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
@@ -223,12 +229,13 @@ pub async fn post_tts_and_play(
     check_rate_limit(&state, &token)?;
     let lang = query.lang.clone().unwrap_or_else(|| "en".to_string());
     let voice = query.voice.clone().unwrap_or_else(|| "M1".to_string());
+    let config = state.config.get().await;
     sonicboom::engine::validate_tts_input(
         &body,
         &lang,
         &voice,
-        state.config.inference_steps,
-        state.config.max_text_length,
+        config.model.inference_steps,
+        config.tts.max_text_length,
     )
     .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
@@ -274,7 +281,7 @@ pub async fn post_tts_and_play(
 
     // Ensure the temp directory exists with restrictive permissions.
     let temp_dir =
-        crate::tts::queue::ensure_temp_dir(std::path::Path::new(&state.config.temp_audio_dir))
+        crate::tts::queue::ensure_temp_dir(std::path::Path::new(&config.paths.temp_audio))
             .map_err(|e| AppError::internal(format!("temp audio dir unavailable: {e}")))?;
 
     // Save to a temp file readable only by the server user (synthesized

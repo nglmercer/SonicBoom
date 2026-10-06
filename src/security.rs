@@ -3,11 +3,11 @@ use axum::{
     extract::State,
     http::{HeaderValue, Request, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use std::sync::Arc;
 
-use crate::config::AppConfig;
+use crate::config::ConfigManager;
 
 /// Add defense-in-depth security headers to responses.
 ///
@@ -20,7 +20,7 @@ use crate::config::AppConfig;
 ///   static assets, so no `'unsafe-inline'` is needed. The TTS demo page
 ///   plays audio from a blob URL, hence `media-src 'self' blob:`.
 pub async fn security_headers(
-    State(config): State<Arc<AppConfig>>,
+    State(config): State<Arc<ConfigManager>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -33,7 +33,8 @@ pub async fn security_headers(
     );
     // HSTS is opt-in: only enable when the deployment is known-HTTPS
     // (direct TLS or a trusted TLS-terminating proxy for all traffic).
-    if config.enable_hsts {
+    // Read live: the header follows hot-reloaded configuration.
+    if config.get().await.security.enable_hsts {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
             HeaderValue::from_static("max-age=63072000; includeSubDomains"),
@@ -60,6 +61,56 @@ pub async fn security_headers(
     response
 }
 
+/// Reject browser cross-origin mutations and DNS rebinding in local mode.
+pub async fn request_origin_guard(
+    State(config): State<Arc<ConfigManager>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let cfg = config.get().await;
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok());
+    if cfg.server.auth_mode == crate::config::AuthMode::Local {
+        let valid_host = host
+            .and_then(|host| format!("http://{host}").parse::<axum::http::Uri>().ok())
+            .and_then(|uri| uri.host().map(str::to_string))
+            .is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+        if !valid_host {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    if !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    ) {
+        let cross_site = request
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|v| v == "cross-site");
+        let foreign_origin = request.headers().get(header::ORIGIN).is_some_and(|origin| {
+            origin
+                .to_str()
+                .ok()
+                .and_then(|origin| origin.parse::<axum::http::Uri>().ok())
+                .and_then(|origin| origin.authority().map(|a| a.as_str().to_string()))
+                .as_deref()
+                != host
+        });
+        if cross_site || foreign_origin {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    next.run(request).await
+}
+
 /// Prevent caching of sensitive admin responses (auth state, one-time token
 /// display, auth redirects). Applied as a layer over the whole admin router.
 pub async fn no_store_cache(request: Request<Body>, next: Next) -> Response {
@@ -82,6 +133,8 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    use crate::config::AppConfig;
+
     async fn body_text(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -89,47 +142,10 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
-    fn test_config(hsts: bool) -> Arc<AppConfig> {
-        Arc::new(AppConfig {
-            admin_id: "admin".to_string(),
-            admin_pw: "long-enough-test-password".to_string(),
-            enable_sample_token: false,
-            token_store_path: String::new(),
-            model_cache_dir: String::new(),
-            model_revision: crate::config::DEFAULT_MODEL_REVISION.to_string(),
-            model_hashes_path: None,
-            hf_token: None,
-            inference_steps: 5,
-            port: 17842,
-            log_dir: String::new(),
-            log_level: "info".to_string(),
-            log_to_file: false,
-            log_to_stdout: false,
-            auth_required: true,
-            allowed_audio_dir: None,
-            max_text_length: 100,
-            request_timeout_secs: 1,
-            max_concurrent_inference: 1,
-            max_pending_inference: 1,
-            max_chunk_chars: 10,
-            tts_rate_limit_requests: 0,
-            tts_rate_limit_window_secs: 60,
-            tts_rate_limit_burst: 300,
-            audio_output_device: "default".to_string(),
-            tts_max_body_bytes: 1024,
-            openai_max_body_bytes: 1024,
-            queue_max_body_bytes: 1024,
-            admin_max_body_bytes: 1024,
-            trust_proxy: false,
-            trusted_proxies: vec![],
-            cookie_secure: false,
-            admin_session_expiry_secs: 60,
-            temp_audio_dir: "./temp_audio".to_string(),
-            enable_hsts: hsts,
-            max_playback_queue_items: 100,
-            model_download_connect_timeout_secs: 10,
-            model_download_timeout_secs: 1800,
-        })
+    fn test_config(hsts: bool) -> Arc<ConfigManager> {
+        let mut config = AppConfig::default();
+        config.security.enable_hsts = hsts;
+        ConfigManager::in_memory(config)
     }
 
     fn app() -> Router {

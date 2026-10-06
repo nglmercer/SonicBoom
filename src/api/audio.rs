@@ -5,9 +5,9 @@
 //! manipulation runs inside the dedicated playback thread; these handlers
 //! only exchange plain data with it via [`AudioManager`].
 //!
-//! Runtime selection via `POST /api/audio/output` is process-local: it is
-//! not persisted anywhere (SonicBoom never rewrites `.env`). The startup
-//! selection comes from `AUDIO_OUTPUT_DEVICE`.
+//! Device changes go through the central [`ConfigManager`] so they are
+//! persisted to `config.toml` and applied everywhere (GUI, CLI, API, MCP,
+//! or a direct TOML edit all produce the same change; spec §25/§26).
 
 use axum::{
     Json,
@@ -29,6 +29,7 @@ pub struct SetOutputRequest {
 }
 
 /// Success body for `POST /api/audio/output`.
+#[cfg(test)]
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct SetOutputResponse {
     pub success: bool,
@@ -36,6 +37,23 @@ pub struct SetOutputResponse {
     pub device: String,
     /// Resolved hardware device name behind the committed selection.
     pub resolved_name: Option<String>,
+}
+
+/// Success body for `GET /api/audio/output`.
+///
+/// Distinguishes the configured value from the
+/// active runtime value (spec §27): they differ
+/// when a runtime apply failed.
+#[derive(Debug, Serialize)]
+pub struct OutputDeviceResponse {
+    /// Selection recorded in `config.toml`.
+    pub configured: String,
+    /// Device the playback subsystem is actually using.
+    pub device: String,
+    /// Resolved hardware device name behind the active device.
+    pub resolved_name: Option<String>,
+    /// Whether the active device is currently available.
+    pub available: bool,
 }
 
 fn failure(status: StatusCode, message: &str) -> Response {
@@ -97,8 +115,18 @@ pub async fn get_output_device(
         Some(manager) => manager,
         None => return no_audio_manager(),
     };
+    let configured = state.config.get().await.audio.output_device.clone();
     match audio_manager.output_device().await {
-        Ok(active) => (StatusCode::OK, Json(active)).into_response(),
+        Ok(active) => (
+            StatusCode::OK,
+            Json(OutputDeviceResponse {
+                configured,
+                device: active.device,
+                resolved_name: active.resolved_name,
+                available: active.available,
+            }),
+        )
+            .into_response(),
         Err(_) => failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "Audio playback system unavailable.",
@@ -108,9 +136,9 @@ pub async fn get_output_device(
 
 /// `POST /api/audio/output`: switch the output device at runtime.
 ///
-/// Unknown devices are `400` with no fallback to another device; a failed
-/// switch leaves the previous working output active. Process-local: the
-/// selection does not survive restarts (see `AUDIO_OUTPUT_DEVICE`).
+/// Validate the device, persist through ConfigManager, then let the shared
+/// reconfiguration coordinator apply it. The response acknowledges a
+/// committed selection; runtime failures appear in configuration status.
 pub async fn set_output_device(
     _token: AuthenticatedToken,
     State(state): State<AppState>,
@@ -133,33 +161,40 @@ pub async fn set_output_device(
             "device must not contain control characters",
         );
     }
-    match audio_manager.set_output_device(device).await {
-        Ok(active) => (
+    let devices = match audio_manager.output_devices().await {
+        Ok(devices) => devices,
+        Err(_) => {
+            return failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Audio device enumeration failed.",
+            );
+        }
+    };
+    let Some(selected) = devices.devices.iter().find(|entry| entry.id == device) else {
+        return failure(StatusCode::BAD_REQUEST, "Unknown audio output device.");
+    };
+    match state
+        .config
+        .update(None, |config| config.audio.output_device = device.clone())
+        .await
+    {
+        Ok(_) => (
             StatusCode::OK,
-            Json(SetOutputResponse {
-                success: true,
-                device: active.device,
-                resolved_name: active.resolved_name,
-            }),
+            Json(serde_json::json!({
+                "success": true,
+                "device": device,
+                "resolved_name": selected.name,
+                "status": "pending",
+            })),
         )
             .into_response(),
-        Err(AudioManagerError::UnknownDevice) => {
-            failure(StatusCode::BAD_REQUEST, "Unknown audio output device.")
-        }
-        Err(AudioManagerError::OutputUnavailable) => {
-            failure(StatusCode::SERVICE_UNAVAILABLE, "Audio output unavailable.")
-        }
-        Err(AudioManagerError::DeviceError) => {
-            tracing::error!("POST /api/audio/output: OS enumeration failed");
+        Err(error) => {
+            tracing::error!("audio output configuration rejected: {error}");
             failure(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Audio device enumeration failed.",
+                StatusCode::CONFLICT,
+                "Audio output configuration could not be committed.",
             )
         }
-        Err(_) => failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Audio playback system unavailable.",
-        ),
     }
 }
 

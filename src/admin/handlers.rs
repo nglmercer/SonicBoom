@@ -11,14 +11,19 @@ use tower_sessions::Session;
 use crate::{
     admin::{client_ip, lockout::LoginAttemptTracker, session, templates},
     auth::store::TokenStore,
-    config::AppConfig,
+    config::{ConfigManager, SecretStore, secrets},
 };
 
 #[derive(Clone)]
 pub struct AdminState {
     pub token_store: Arc<TokenStore>,
     pub lockout: Arc<LoginAttemptTracker>,
-    pub config: Arc<AppConfig>,
+    /// Central configuration (auth mode, security
+    /// policy, body limits).
+    pub config: Arc<ConfigManager>,
+    /// Secret store: the admin password lives here,
+    /// never in `config.toml`.
+    pub secrets: Arc<dyn SecretStore>,
 }
 
 pub async fn get_login(session: Session) -> Response {
@@ -41,7 +46,8 @@ pub async fn post_login(
     session: Session,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let ip = client_ip::client_ip(&headers, addr, &state.config);
+    let config = state.config.get().await;
+    let ip = client_ip::client_ip(&headers, addr, &config);
 
     if state.lockout.is_locked(ip) {
         return (
@@ -53,11 +59,17 @@ pub async fn post_login(
             .into_response();
     }
 
+    // The admin password lives in the secret store
+    // (never in config.toml). A missing or
+    // unreadable password fails closed.
+    let admin_pw = secrets::load_admin_password(state.secrets.as_ref())
+        .unwrap_or_default()
+        .unwrap_or_default();
+
     // Constant-time comparison to prevent timing attacks on credential validation
     let id_match =
-        constant_time_eq::constant_time_eq(form.id.as_bytes(), state.config.admin_id.as_bytes());
-    let pw_match =
-        constant_time_eq::constant_time_eq(form.pw.as_bytes(), state.config.admin_pw.as_bytes());
+        constant_time_eq::constant_time_eq(form.id.as_bytes(), config.admin.username.as_bytes());
+    let pw_match = constant_time_eq::constant_time_eq(form.pw.as_bytes(), admin_pw.as_bytes());
 
     if id_match && pw_match {
         state.lockout.record_success(ip);

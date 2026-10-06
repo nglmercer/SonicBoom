@@ -1,6 +1,8 @@
 #[cfg(feature = "playback")]
 pub mod audio;
+pub mod config_api;
 pub mod gate;
+pub mod info;
 pub mod openai;
 #[cfg(feature = "playback")]
 pub mod queue;
@@ -14,14 +16,33 @@ use axum::{
     routing::{get, post},
 };
 
-pub fn router(state: AppState) -> Router {
-    let tts_body_limit = state.config.tts_max_body_bytes;
-    let openai_body_limit = state.config.openai_max_body_bytes;
+/// Build the API router. Body limits are read live
+/// from the configuration so limit changes apply
+/// when the listener restarts (spec §23).
+pub async fn router(state: AppState) -> Router {
+    let tts_body_limit = state.config.get().await.tts.max_body_bytes;
+    let openai_body_limit = state.config.get().await.tts.openai_max_body_bytes;
     #[cfg(feature = "playback")]
-    let queue_body_limit = state.config.queue_max_body_bytes;
+    let queue_body_limit = state.config.get().await.tts.queue_max_body_bytes;
 
     #[allow(unused_mut)]
     let mut router = Router::new()
+        // Server info (auth discovery for the GUI).
+        .route("/api/info", get(info::get_info))
+        // Configuration API (spec §33).
+        .route(
+            "/api/config",
+            get(config_api::get_config).patch(config_api::patch_config),
+        )
+        .route("/api/config/schema", get(config_api::get_schema))
+        .route("/api/config/status", get(config_api::get_status))
+        .route("/api/config/reload", post(config_api::reload_config))
+        .route("/api/config/open", post(config_api::open_config_file))
+        .route("/api/config/effective", get(config_api::get_effective))
+        .route(
+            "/api/config/validate",
+            post(config_api::validate_config_file),
+        )
         // Original TTS API
         .route(
             "/api/tts",
@@ -75,7 +96,9 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use super::*;
     use crate::auth::store::TokenStore;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, ConfigManager, secrets::MemorySecretStore};
+    use crate::runtime::ModelService;
+    use crate::runtime::subsystems::{InferenceGateManager, RateLimiterManager};
     use crate::tts::ModelStatus;
     use axum::{
         body::Body,
@@ -86,45 +109,29 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_config() -> AppConfig {
-        AppConfig {
-            admin_id: "admin".to_string(),
-            admin_pw: "long-enough-test-password".to_string(),
-            enable_sample_token: false,
-            token_store_path: String::new(),
-            model_cache_dir: String::new(),
-            model_revision: "test".to_string(),
-            model_hashes_path: None,
-            hf_token: None,
-            inference_steps: 5,
-            port: 17842,
-            log_dir: String::new(),
-            log_level: "info".to_string(),
-            log_to_file: false,
-            log_to_stdout: false,
-            auth_required: true,
-            allowed_audio_dir: Some("/tmp".to_string()),
-            max_text_length: 10_000,
-            request_timeout_secs: 5,
-            max_concurrent_inference: 1,
-            max_pending_inference: 8,
-            max_chunk_chars: 200,
-            tts_rate_limit_requests: 0, // disabled for auth tests
-            tts_rate_limit_window_secs: 60,
-            tts_rate_limit_burst: 300,
-            audio_output_device: "default".to_string(),
-            tts_max_body_bytes: 65_536,
-            openai_max_body_bytes: 65_536,
-            queue_max_body_bytes: 16_384,
-            admin_max_body_bytes: 16_384,
-            trust_proxy: false,
-            trusted_proxies: vec![],
-            cookie_secure: false,
-            admin_session_expiry_secs: 60,
-            temp_audio_dir: "./temp_audio".to_string(),
-            enable_hsts: false,
-            max_playback_queue_items: 100,
-            model_download_connect_timeout_secs: 10,
-            model_download_timeout_secs: 1800,
+        let mut config = AppConfig::default();
+        config.server.auth_mode = crate::config::AuthMode::Token;
+        config.tts.max_body_bytes = 65_536;
+        config.tts.openai_max_body_bytes = 65_536;
+        config.tts.queue_max_body_bytes = 16_384;
+        config.paths.audio = Some("/tmp".to_string());
+        config
+    }
+
+    fn test_state(
+        config: AppConfig,
+        token_store: Arc<TokenStore>,
+        audio_manager: Arc<Option<crate::AudioManager>>,
+    ) -> AppState {
+        AppState {
+            model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
+            token_store,
+            config: ConfigManager::in_memory(config),
+            audio_manager,
+            inference_gate: Arc::new(InferenceGateManager::new(gate::InferenceGate::new(1, 8))),
+            rate_limiter: Arc::new(RateLimiterManager::new(rate_limit::RateLimiter::new(0, 60))),
+            model_service: Arc::new(ModelService::new(Arc::new(RwLock::new(ModelStatus::Idle)))),
+            secrets: Arc::new(MemorySecretStore::default()),
         }
     }
 
@@ -136,16 +143,9 @@ mod tests {
         ));
         let store = TokenStore::load(path.to_str().unwrap()).await.unwrap();
         let (_token, raw) = store.create(None).await.unwrap();
-        let state = AppState {
-            model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
-            token_store: Arc::new(store),
-            config: Arc::new(test_config()),
-            audio_manager: Arc::new(None),
-            inference_gate: Arc::new(gate::InferenceGate::new(1, 8)),
-            rate_limiter: Arc::new(rate_limit::RateLimiter::new(0, 60)),
-        };
+        let state = test_state(test_config(), Arc::new(store), Arc::new(None));
         let _ = std::fs::remove_file(&path);
-        (router(state), raw)
+        (router(state).await, raw)
     }
 
     async fn post_status(app: Router, uri: &str, token: Option<&str>, body: &str) -> StatusCode {
@@ -172,16 +172,9 @@ mod tests {
         let (_token, raw) = store.create(None).await.unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let manager = crate::tts::queue::AudioManager::for_test(tx);
-        let state = AppState {
-            model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
-            token_store: Arc::new(store),
-            config: Arc::new(test_config()),
-            audio_manager: Arc::new(Some(manager)),
-            inference_gate: Arc::new(gate::InferenceGate::new(1, 8)),
-            rate_limiter: Arc::new(rate_limit::RateLimiter::new(0, 60)),
-        };
+        let state = test_state(test_config(), Arc::new(store), Arc::new(Some(manager)));
         let _ = std::fs::remove_file(&path);
-        (router(state), raw, rx)
+        (router(state).await, raw, rx)
     }
 
     #[cfg(feature = "playback")]
@@ -201,6 +194,30 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn configuration_endpoints_require_token_authentication() {
+        let (app, _) = test_app().await;
+        for (method, path) in [
+            ("GET", "/api/config"),
+            ("GET", "/api/config/schema"),
+            ("GET", "/api/config/status"),
+            ("POST", "/api/config/reload"),
+            ("PATCH", "/api/config"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"changes":{}}"#))
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED,
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -387,17 +404,20 @@ mod tests {
         let store = TokenStore::load(path.to_str().unwrap()).await.unwrap();
         let (_token, raw) = store.create(None).await.unwrap();
         let mut config = test_config();
-        config.tts_rate_limit_requests = 2;
+        config.rate_limit.requests = 2;
+        config.rate_limit.burst = 2;
         let state = AppState {
             model_status: Arc::new(RwLock::new(ModelStatus::Idle)),
             token_store: Arc::new(store),
-            config: Arc::new(config),
+            config: ConfigManager::in_memory(config),
             audio_manager: Arc::new(None),
-            inference_gate: Arc::new(gate::InferenceGate::new(1, 8)),
-            rate_limiter: Arc::new(rate_limit::RateLimiter::new(2, 60)),
+            inference_gate: Arc::new(InferenceGateManager::new(gate::InferenceGate::new(1, 8))),
+            rate_limiter: Arc::new(RateLimiterManager::new(rate_limit::RateLimiter::new(2, 60))),
+            model_service: Arc::new(ModelService::new(Arc::new(RwLock::new(ModelStatus::Idle)))),
+            secrets: Arc::new(MemorySecretStore::default()),
         };
         let _ = std::fs::remove_file(&path);
-        let app = router(state);
+        let app = router(state).await;
 
         for _ in 0..2 {
             assert_eq!(
@@ -515,58 +535,44 @@ mod tests {
     #[cfg(feature = "playback")]
     #[tokio::test]
     async fn audio_output_selection_success_and_unknown_rejected() {
-        use crate::tts::devices::ActiveOutputDevice;
-        use crate::tts::queue::{AudioCommand, AudioManagerError};
-
-        // Successful switch commits and reports the resolved device.
-        let (app, valid, mut rx) = audio_test_parts().await;
-        tokio::spawn(async move {
-            match rx.recv().await {
-                Some(AudioCommand::SetOutputDevice { device, reply }) => {
-                    assert_eq!(device, "CABLE Input");
-                    let _ = reply.send(Ok(ActiveOutputDevice {
-                        device: "CABLE Input".to_string(),
-                        resolved_name: Some("CABLE Input".to_string()),
-                        available: true,
-                    }));
+        use crate::tts::devices::{OutputDeviceInfo, OutputDeviceList};
+        use crate::tts::queue::AudioCommand;
+        for (device, expected) in [
+            ("CABLE Input", StatusCode::OK),
+            ("Nope", StatusCode::BAD_REQUEST),
+        ] {
+            let (app, valid, mut rx) = audio_test_parts().await;
+            let task = tokio::spawn(async move {
+                match rx.recv().await {
+                    Some(AudioCommand::GetOutputDevices { reply }) => {
+                        let _ = reply.send(Ok(OutputDeviceList {
+                            devices: vec![OutputDeviceInfo {
+                                id: "CABLE Input".into(),
+                                name: "CABLE Input".into(),
+                                is_default: false,
+                                is_selected: false,
+                            }],
+                            selected: "default".into(),
+                        }));
+                    }
+                    other => panic!("unexpected command: {other:?}"),
                 }
-                other => panic!("unexpected command: {other:?}"),
+                // The handler must not bypass the coordinator by switching hardware.
+                assert!(rx.recv().await.is_none());
+            });
+            let body = serde_json::json!({"device": device}).to_string();
+            let response = app
+                .oneshot(authed("/api/audio/output", &valid, "POST", &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::OK {
+                let body = body_json(response).await;
+                assert_eq!(body["device"], device);
+                assert_eq!(body["status"], "pending");
             }
-        });
-        let response = app
-            .oneshot(authed(
-                "/api/audio/output",
-                &valid,
-                "POST",
-                r#"{"device":"CABLE Input"}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_json(response).await;
-        assert_eq!(body["success"], true);
-        assert_eq!(body["device"], "CABLE Input");
-        assert_eq!(body["resolved_name"], "CABLE Input");
-
-        // Unknown devices are 400 with no fallback.
-        let (app, valid, mut rx) = audio_test_parts().await;
-        tokio::spawn(async move {
-            if let Some(AudioCommand::SetOutputDevice { reply, .. }) = rx.recv().await {
-                let _ = reply.send(Err(AudioManagerError::UnknownDevice));
-            }
-        });
-        let response = app
-            .oneshot(authed(
-                "/api/audio/output",
-                &valid,
-                "POST",
-                r#"{"device":"Nope"}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = body_json(response).await;
-        assert_eq!(body["success"], false);
+            task.await.unwrap();
+        }
     }
 
     #[cfg(feature = "playback")]

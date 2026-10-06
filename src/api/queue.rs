@@ -169,10 +169,14 @@ pub async fn queue_audio(
         }
     };
 
-    let allowed_dir = match state.config.allowed_audio_dir.as_deref() {
+    // The allowed audio directory is read per
+    // request so configuration changes apply
+    // immediately.
+    let config = state.config.get().await;
+    let allowed_dir = match config.paths.audio.as_deref() {
         Some(dir) => dir,
         None => {
-            tracing::error!("filesystem queue used without ALLOWED_AUDIO_DIR");
+            tracing::error!("filesystem queue used without [paths] audio configured");
             return failure(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Filesystem queue is not configured on this server",
@@ -354,8 +358,8 @@ pub async fn set_volume(
     State(state): State<AppState>,
     Json(req): Json<PlaybackControlRequest>,
 ) -> impl IntoResponse {
-    let audio_manager = match &*state.audio_manager {
-        Some(manager) => manager,
+    match &*state.audio_manager {
+        Some(_) => {}
         None => {
             return failure(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -368,14 +372,22 @@ pub async fn set_volume(
         Ok(volume) => volume,
         Err(message) => return failure(StatusCode::BAD_REQUEST, message),
     };
-    if let Err(error) = audio_manager.set_volume(volume).await {
-        return audio_error_response(error);
+    if let Err(error) = state
+        .config
+        .update(None, |cfg| cfg.audio.volume = volume)
+        .await
+    {
+        tracing::warn!("Volume configuration rejected: {error}");
+        return failure(
+            StatusCode::CONFLICT,
+            "Volume configuration could not be committed",
+        );
     }
     (
         StatusCode::OK,
         Json(QueueResponse {
             success: true,
-            message: format!("Volume set to {volume}"),
+            message: format!("Volume {volume} configured; runtime application pending"),
             id: None,
         }),
     )

@@ -10,28 +10,31 @@
 mod admin;
 mod api;
 mod auth;
+mod cli;
 mod config;
 mod error;
 mod logging;
+mod runtime;
 mod security;
+mod server;
+mod setup;
 mod web;
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_http::{
-    timeout::TimeoutLayer,
-    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
-};
-use tower_sessions::{MemoryStore, SessionManagerLayer};
 
 use admin::{handlers::AdminState, lockout::LoginAttemptTracker};
 use api::{gate::InferenceGate, rate_limit::RateLimiter};
 use auth::store::TokenStore;
-use config::AppConfig;
+use config::{ConfigManager, paths, secrets};
+use runtime::ModelService;
+use runtime::reconfigure::reconfiguration_loop;
+use runtime::subsystems::{InferenceGateManager, RateLimiterManager};
+use server::ApiServerManager;
 use sonicboom::tts;
+use tts::ModelStatus;
 #[cfg(feature = "playback")]
 use tts::queue::AudioManager;
-use tts::{ModelStatus, download, model::ModelHandle};
 
 /// Type alias for the audio manager when feature is disabled.
 #[cfg(not(feature = "playback"))]
@@ -41,14 +44,20 @@ type AudioManager = ();
 pub struct AppState {
     pub model_status: Arc<RwLock<ModelStatus>>,
     pub token_store: Arc<TokenStore>,
-    pub config: Arc<AppConfig>,
+    /// Central configuration: every subsystem reads the
+    /// live configuration through this manager.
+    pub config: Arc<ConfigManager>,
     /// Audio manager for server-side playback. `None` when the `playback` feature is disabled
     /// or when initialization fails.
     pub audio_manager: Arc<Option<AudioManager>>,
     /// Bounded admission control for model inference (see [`InferenceGate`]).
-    pub inference_gate: Arc<InferenceGate>,
+    pub inference_gate: Arc<InferenceGateManager>,
     /// Per-token token-bucket rate limiter for expensive endpoints.
-    pub rate_limiter: Arc<RateLimiter>,
+    pub rate_limiter: Arc<RateLimiterManager>,
+    /// Model lifecycle owner (download, load, reload).
+    pub model_service: Arc<ModelService>,
+    /// Secret store (admin password, HuggingFace token).
+    pub secrets: Arc<dyn secrets::SecretStore>,
 }
 
 #[cfg(all(feature = "gui", not(target_os = "linux")))]
@@ -59,237 +68,254 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
+#[cfg(feature = "gui")]
+static GUI_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+#[cfg(feature = "gui")]
+fn update_gui_url(address: std::net::SocketAddr) {
+    let address = if address.ip().is_unspecified() {
+        std::net::SocketAddr::new(
+            if address.is_ipv6() {
+                "::1".parse().unwrap()
+            } else {
+                "127.0.0.1".parse().unwrap()
+            },
+            address.port(),
+        )
+    } else {
+        address
+    };
+    if let Ok(mut url) = GUI_URL.write() {
+        *url = Some(format!("http://{address}"));
+    }
+}
+
+#[cfg(feature = "gui")]
+fn open_application() {
+    if let Some(url) = GUI_URL.read().ok().and_then(|url| url.clone()) {
+        let _ = open::that_detached(url);
+    }
+}
+
+#[cfg(feature = "gui")]
+fn show_startup_error(message: &str) {
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let path =
+        std::env::temp_dir().join(format!("sonicboom-recovery-{}.html", uuid::Uuid::new_v4()));
+    let config_path = paths::resolve_config_path();
+    let page = format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>SonicBoom configuration error</title><h1>SonicBoom could not start</h1><pre>{}</pre><p>Configuration file: <code>{}</code></p><p>Correct the file and launch SonicBoom again. The existing configuration was preserved.</p></html>",
+        escape(message),
+        escape(&config_path.display().to_string())
+    );
+    if std::fs::write(&path, page).is_ok() {
+        let _ = open::that(path);
+    }
+}
+
+/// Outcome of first-run preparation.
+enum PrepareOutcome {
+    /// An existing (or migrated) configuration is ready.
+    Ready,
+    /// A bootstrap configuration was created; first-run
+    /// setup is pending.
+    FirstRun,
+}
+
 fn main() -> anyhow::Result<()> {
-    // Desktop first-run bootstrap (gui builds only): sidecar `.env`,
-    // exe-adjacent data dirs, generated admin password. Headless server
-    // builds keep fail-closed behavior (refuse without explicit password).
-    #[cfg(feature = "gui")]
-    ensure_gui_env();
+    let args: Vec<String> = std::env::args().collect();
 
-    // Load environment variables from .env file
-    dotenvy::dotenv().ok();
+    // CLI mode: `sonicboom config …` operates on the
+    // configuration file through the same
+    // `ConfigManager` the server uses, then exits.
+    if args.len() > 1 && args[1] == "config" {
+        let rt = tokio::runtime::Runtime::new()?;
+        let outcome = rt.block_on(cli::run_config(&args[2..]));
+        let code = match outcome {
+            Ok(()) => 0,
+            Err(code) => code,
+        };
+        std::process::exit(code);
+    }
 
-    let config = Arc::new(match AppConfig::from_env() {
-        Ok(config) => config,
+    // First-run detection: migrate a legacy `.env` or
+    // bootstrap a fresh `config.toml`.
+    let config_path = paths::resolve_config_path();
+    match prepare_config(&config_path) {
+        Ok(_outcome) => {}
         Err(e) => {
             eprintln!("Configuration error: {e}");
+            #[cfg(feature = "gui")]
+            show_startup_error(&e);
             std::process::exit(1);
         }
-    });
-
-    // Validate configuration
-    if let Err(e) = config.validate() {
-        eprintln!("Configuration error: {e}");
-        std::process::exit(1);
     }
-
-    // Fail closed when the filesystem queue root is unusable.
-    #[cfg(feature = "playback")]
-    if let Some(dir) = config.allowed_audio_dir.as_deref() {
-        match std::path::Path::new(dir).canonicalize() {
-            Ok(canonical) if canonical.is_dir() => {}
-            Ok(_) => {
-                eprintln!("Configuration error: ALLOWED_AUDIO_DIR is not a directory");
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("Configuration error: cannot access ALLOWED_AUDIO_DIR: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Initialize logging
-    logging::init(
-        &config.log_dir,
-        &config.log_level,
-        config.log_to_file,
-        config.log_to_stdout,
-    );
-
-    // Log startup
-    logging::log_startup(config.port, &config.log_dir);
-
-    tracing::info!(admin_id = %config.admin_id, "Admin credentials loaded");
 
     #[cfg(feature = "gui")]
     {
-        run_gui(config)
+        run_gui(config_path)
     }
 
     #[cfg(not(feature = "gui"))]
     {
         // --- Start the Tokio server on the current thread ---
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(run_server(config))
+        rt.block_on(run_server(config_path))
     }
 }
 
-/// First-run bootstrap for desktop (`gui`) builds so a basic user can
-/// double-click the app with no terminal and no exported environment.
+/// First-run preparation (spec §9/§11):
 ///
-/// Headless server builds intentionally fail closed when `SONICBOOM_ADMIN_PW`
-/// is missing (see `config::AppConfig::validate`). A GUI app has no console
-/// (Windows hides it via `#![windows_subsystem]`), so that failure looks
-/// like an instant silent crash. For `gui` builds only this function:
-/// 1. loads a sidecar `.env` next to the executable (in addition to the
-///    CWD `.env`), so a double-clicked app finds its config;
-/// 2. defaults data dirs (`TOKEN_STORE_PATH`, `MODEL_CACHE_DIR`, `LOG_DIR`,
-///    `TEMP_AUDIO_DIR`, plus `ALLOWED_AUDIO_DIR` with `playback`) to
-///    exe-adjacent locations when unset, creating them best-effort;
-/// 3. generates a random 256-bit admin password on first run and persists
-///    it to that sidecar `.env` (`0600` on Unix) when `SONICBOOM_ADMIN_PW`
-///    is still missing. This is a unique per-install secret, never a
-///    well-known default, so the password policy still holds. The value
-///    itself is never logged; only the file path is reported.
-///
-/// Explicitly-set environment variables always win: nothing here overrides
-/// an existing non-empty value.
-#[cfg(feature = "gui")]
-fn ensure_gui_env() {
-    use std::env;
-
-    // Base directory: executable's parent, falling back to the CWD.
-    let base_dir: std::path::PathBuf = env::current_exe()
+/// - `config.toml` exists → nothing to do.
+/// - Legacy `.env` exists → migrate known values into
+///   `config.toml` (secrets stay in the environment /
+///   secret store).
+/// - Neither → bootstrap a fresh `config.toml` with
+///   `setup_complete = false` so the first-run wizard
+///   runs.
+fn prepare_config(config_path: &std::path::Path) -> Result<PrepareOutcome, String> {
+    if config_path.is_file() {
+        return Ok(PrepareOutcome::Ready);
+    }
+    // Legacy `.env`: the working-directory file first,
+    // then the executable-adjacent sidecar (portable
+    // desktop installs).
+    let mut env_candidates = vec![std::path::PathBuf::from(".env")];
+    if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .or_else(|| env::current_dir().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    // Load configs: CWD `.env` first, then the exe-adjacent sidecar (which
-    // only fills in variables the process env / CWD file did not set).
-    dotenvy::dotenv().ok();
-    let sidecar_env = base_dir.join(".env");
-    dotenvy::from_path(&sidecar_env).ok();
-
-    // Set `name` only when currently unset or blank.
-    let set_default = |name: &str, value: String| {
-        let missing = env::var(name).map(|v| v.trim().is_empty()).unwrap_or(true);
-        if missing {
-            // Safe here: called on the main thread before any other threads
-            // are spawned (`ensure_gui_env` runs first in `main`).
-            unsafe { env::set_var(name, value) };
-        }
-    };
-
-    // Exe-adjacent data dirs so double-click runs don't depend on the CWD
-    // (which for a GUI launch is unpredictable and may not be writable).
-    let dir_default = |name: &str, leaf: &str, create: bool| {
-        let path = base_dir.join(leaf);
-        if create {
-            let _ = std::fs::create_dir_all(&path);
-        }
-        if let Some(s) = path.to_str() {
-            set_default(name, s.to_string());
-        }
-    };
-
-    dir_default("MODEL_CACHE_DIR", "models", true);
-    dir_default("LOG_DIR", "logs", true);
-    dir_default("TEMP_AUDIO_DIR", "temp_audio", true);
-    // Token store is a file, not a dir: default the path, don't create it
-    // here (`TokenStore::load` creates it with restrictive permissions).
-    if let Some(s) = base_dir.join("tokens.json").to_str() {
-        set_default("TOKEN_STORE_PATH", s.to_string());
+    {
+        env_candidates.push(exe_dir.join(".env"));
     }
-    #[cfg(feature = "playback")]
-    dir_default("ALLOWED_AUDIO_DIR", "audio", true);
-
-    ensure_gui_port(&base_dir);
-
-    // First run: no admin password anywhere -> generate + persist.
-    let pw_missing = env::var("SONICBOOM_ADMIN_PW")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true);
-    if !pw_missing {
-        return;
-    }
-
-    let generated = crate::auth::token::generate_token_value();
-    // Persist to the sidecar `.env` (fall back to `./.env`), updating an
-    // existing assignment in place so re-runs keep a single entry.
-    let mut target = sidecar_env.clone();
-    if persist_env_value(&target, "SONICBOOM_ADMIN_PW", &generated).is_err() {
-        target = std::path::PathBuf::from(".env");
-        if persist_env_value(&target, "SONICBOOM_ADMIN_PW", &generated).is_err() {
-            // Last resort: in-memory only for this run (the password changes
-            // next restart). Still better than a silent exit for a GUI user.
-            eprintln!(
-                "Warning: could not write generated SONICBOOM_ADMIN_PW to '{}' or './.env'; \
-                 using an in-memory password for this run only.",
-                sidecar_env.display()
-            );
-        }
-    }
-    // Safe here: still on the main thread before the server thread spawns.
-    unsafe { env::set_var("SONICBOOM_ADMIN_PW", &generated) };
-    eprintln!(
-        "Generated a random admin password and saved it to '{}'. \
-         Open that file to sign in to /admin (the tray menu 'Open File Directory' shows the folder). \
-         The password itself is never logged.",
-        target.display()
-    );
-}
-
-/// Insert or replace `key=value` in the `.env` file at `path`, creating it
-/// (and parents) as needed. Restricts permissions to `0600` on Unix.
-#[cfg(feature = "gui")]
-fn persist_env_value(path: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let assignment = format!("{key}={value}");
-    let merged = match std::fs::read_to_string(path) {
-        Ok(existing) => {
-            let mut replaced = false;
-            let mut lines: Vec<String> = Vec::new();
-            for line in existing.lines() {
-                let trimmed = line.trim_start();
-                let key_line = trimmed == key
-                    || trimmed.starts_with(&format!("{key}="))
-                    || trimmed.starts_with(&format!("{key} "));
-                if !replaced && key_line {
-                    // Preserve an `export ` prefix style if the user used it.
-                    if trimmed.starts_with("export ") {
-                        lines.push(format!("export {assignment}"));
-                    } else {
-                        lines.push(assignment.clone());
-                    }
-                    replaced = true;
-                } else {
-                    lines.push(line.to_string());
+    for env_path in &env_candidates {
+        if env_path.is_file() {
+            match config::migration::migrate_if_needed(config_path, env_path) {
+                Ok(Some(summary)) => {
+                    eprintln!("{summary}");
+                    return Ok(PrepareOutcome::Ready);
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    return Err(format!("migrating {} failed: {e}", env_path.display()));
                 }
             }
-            if !replaced {
-                lines.push(assignment);
-            }
-            let mut out = lines.join("\n");
-            out.push('\n');
-            out
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!("{assignment}\n"),
-        Err(e) => return Err(e),
+    }
+    // No configuration anywhere: bootstrap a first-run
+    // configuration. The server starts in bootstrap mode
+    // (loopback-only, no API bearer auth) and serves the
+    // setup wizard until setup completes.
+    // The platform data directories the defaults point
+    // at may not exist yet; create the common ones.
+    let data_dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(paths::data_dir);
+    for leaf in ["models", "logs", "temp_audio", "audio"] {
+        let _ = std::fs::create_dir_all(data_dir.join(leaf));
+    }
+    // Point the default configuration at the platform
+    // data directories (the compiled defaults are
+    // relative paths like ./models).
+    let mut bootstrap = config::model::AppConfig::default();
+    bootstrap.model.cache_dir = data_dir.join("models");
+    bootstrap.paths.logs = data_dir.join("logs").to_string_lossy().to_string();
+    bootstrap.paths.temp_audio = data_dir.join("temp_audio").to_string_lossy().to_string();
+    bootstrap.paths.audio = Some(data_dir.join("audio").to_string_lossy().to_string());
+    bootstrap.paths.token_store = data_dir.join("tokens.json").to_string_lossy().to_string();
+    // Existing headless deployments with credentials remain unattended.
+    if !cfg!(feature = "gui") && std::env::var("SONICBOOM_ADMIN_PW").is_ok() {
+        config::validation::validate_admin_password(
+            &std::env::var("SONICBOOM_ADMIN_PW").unwrap_or_default(),
+        )?;
+        bootstrap.setup_complete = true;
+        let mut effective = bootstrap.clone();
+        config::loader::apply_environment(&mut effective, &mut std::collections::HashMap::new())
+            .map_err(|e| e.to_string())?;
+        config::validation::validate(&effective)?;
+    }
+    config::writer::atomic_write_config_blocking(config_path, &bootstrap)
+        .map_err(|e| format!("could not create {}: {e}", config_path.display()))?;
+    Ok(PrepareOutcome::FirstRun)
+}
+
+/// Desktop port handling: avoid the cryptic `Address already in use
+/// (os error 98)` crash that is routine on common ports like 3000.
+///
+/// - A live lock record whose port answers HTTP 200 means *our* server is
+///   already up: exit pointing at it (double-clicking twice must not spawn
+///   a second server).
+/// - Otherwise a taken `PORT` falls through to a nearby free port (gui
+///   only; headless builds keep fail-closed binding), recorded together
+///   with the pid in `<data>/sonicboom.lock` for discovery.
+/// The chosen port is applied as a runtime override (the file is not
+/// rewritten) and always reported loudly: the service must never silently
+/// move ports.
+#[cfg(feature = "gui")]
+async fn ensure_gui_port(config: &ConfigManager, data_dir: &std::path::Path) {
+    let requested: u16 = config.get().await.server.port;
+    let lock_path = data_dir.join(GUI_LOCK_FILE);
+
+    if let Ok(text) = std::fs::read_to_string(&lock_path) {
+        if let Some((old_pid, old_port)) = parse_lock_content(&text) {
+            if probe_port(old_port) == PortProbe::HttpOk {
+                eprintln!(
+                    "SonicBoom is already running (pid {old_pid}) at http://127.0.0.1:{old_port} \
+                     (see '{}'). Stop it first, or delete that file if it is stale and restart.",
+                    lock_path.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let Some(port) = select_gui_port(requested) else {
+        if probe_port(requested) == PortProbe::HttpOk {
+            eprintln!(
+                "Port {requested} is already in use by another application (it answers HTTP on /health). \
+                 Set a different port with server.port in '{}'.",
+                config.path().display()
+            );
+        } else {
+            eprintln!(
+                "No free port in {requested}..={} (scanned {GUI_PORT_SCAN_RANGE} past server.port). \
+                 Set a different port with server.port in '{}'.",
+                requested.saturating_add(GUI_PORT_SCAN_RANGE as u16),
+                config.path().display()
+            );
+        }
+        std::process::exit(1);
     };
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+    if port != requested {
+        eprintln!(
+            "Port {requested} is in use by another application; using {port} instead. \
+             The actual port is recorded in '{}'. To pin a port, set server.port in '{}'.",
+            lock_path.display(),
+            config.path().display()
+        );
+        // Runtime-only override: the operator's file is
+        // not rewritten by a transient port conflict.
+        let update = config.update_runtime(None, |c| c.server.port = port).await;
+        if let Err(e) = update {
+            eprintln!("Warning: could not apply detected port {port}: {e}");
+        }
     }
-    let mut file = opts.open(path)?;
-    file.write_all(merged.as_bytes())?;
-    file.sync_all()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    // A stale record is harmless: the next start re-probes before trusting it.
+    let content = format!("pid={} port={port}\n", std::process::id());
+    if std::fs::write(&lock_path, content).is_err() {
+        eprintln!(
+            "Warning: could not write instance lock to '{}'; \
+             double-click detection and port discovery will be unavailable.",
+            lock_path.display()
+        );
     }
-    Ok(())
 }
 
 /// Instance record so tools and double-clicks can discover the running
@@ -297,7 +323,7 @@ fn persist_env_value(path: &std::path::Path, key: &str, value: &str) -> std::io:
 /// the next start re-probes the recorded port before trusting it.
 #[cfg(feature = "gui")]
 const GUI_LOCK_FILE: &str = "sonicboom.lock";
-/// How far past `PORT` to scan for a free port before giving up.
+/// How far past `server.port` to scan for a free port before giving up.
 #[cfg(feature = "gui")]
 const GUI_PORT_SCAN_RANGE: u32 = 20;
 
@@ -376,90 +402,16 @@ fn select_gui_port(requested: u16) -> Option<u16> {
         .find(|p| probe_port(*p) == PortProbe::Free)
 }
 
-/// Desktop port handling: avoid the cryptic `Address already in use
-/// (os error 98)` crash that is routine on common ports like 3000.
-///
-/// - A live lock record whose port answers HTTP 200 means *our* server is
-///   already up: exit pointing at it (double-clicking twice must not spawn
-///   a second server).
-/// - Otherwise a taken `PORT` falls through to a nearby free port (gui
-///   only; headless builds keep fail-closed binding), recorded together
-///   with the pid in `<base>/sonicboom.lock` for discovery.
-/// The chosen port is exported back into `PORT` for `AppConfig` and always
-/// reported loudly: the service must never silently move ports.
 #[cfg(feature = "gui")]
-fn ensure_gui_port(base_dir: &std::path::Path) {
-    use std::env;
-
-    let requested: u16 = env::var("PORT")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(17842);
-    let lock_path = base_dir.join(GUI_LOCK_FILE);
-    let env_path = base_dir.join(".env");
-
-    if let Ok(text) = std::fs::read_to_string(&lock_path) {
-        if let Some((old_pid, old_port)) = parse_lock_content(&text) {
-            if probe_port(old_port) == PortProbe::HttpOk {
-                eprintln!(
-                    "SonicBoom is already running (pid {old_pid}) at http://127.0.0.1:{old_port} \
-                     (see '{}'). Stop it first, or delete that file if it is stale and restart.",
-                    lock_path.display()
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let Some(port) = select_gui_port(requested) else {
-        if probe_port(requested) == PortProbe::HttpOk {
-            eprintln!(
-                "Port {requested} is already in use by another application (it answers HTTP on /health). \
-                 Set a different port with PORT=<free-port> in '{}', or stop the other application.",
-                env_path.display()
-            );
-        } else {
-            eprintln!(
-                "No free port in {requested}..={} (scanned {GUI_PORT_SCAN_RANGE} past PORT). \
-                 Set a different port with PORT=<free-port> in '{}'.",
-                requested.saturating_add(GUI_PORT_SCAN_RANGE as u16),
-                env_path.display()
-            );
-        }
-        std::process::exit(1);
-    };
-    if port != requested {
-        eprintln!(
-            "Port {requested} is in use by another application; using {port} instead. \
-             The actual port is recorded in '{}'. To pin a port, set PORT=<port> in '{}'.",
-            lock_path.display(),
-            env_path.display()
-        );
-    }
-    // A stale record is harmless: the next start re-probes before trusting it.
-    let content = format!("pid={} port={port}\n", std::process::id());
-    if std::fs::write(&lock_path, content).is_err() {
-        eprintln!(
-            "Warning: could not write instance lock to '{}'; \
-             double-click detection and port discovery will be unavailable.",
-            lock_path.display()
-        );
-    }
-    // Safe here: still on the main thread before the server thread spawns.
-    unsafe { env::set_var("PORT", port.to_string()) };
-}
-
-#[cfg(feature = "gui")]
-fn run_gui(config: Arc<AppConfig>) -> anyhow::Result<()> {
+fn run_gui(config_path: std::path::PathBuf) -> anyhow::Result<()> {
     // --- Start the Tokio server on a dedicated background thread ---
     // This prevents the tray event loop and the tokio runtime from blocking each other.
-    let config_clone = Arc::clone(&config);
     let (server_err_tx, server_err_rx) = std::sync::mpsc::channel::<String>();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
         rt.block_on(async move {
-            if let Err(e) = run_server(config_clone).await {
+            if let Err(e) = run_server(config_path).await {
                 tracing::error!("Server error: {e}");
                 let _ = server_err_tx.send(format!("{e}"));
             }
@@ -477,22 +429,18 @@ fn run_gui(config: Arc<AppConfig>) -> anyhow::Result<()> {
     }
 }
 
-/// Open the executable's directory (where data/models live) in the OS file
-/// browser, falling back to the working directory. Shared by both tray
-/// backends' "Open File Directory" menu items.
+/// Open the platform data directory (where config.toml, models, and logs
+/// live) in the OS file browser, falling back to the working directory.
+/// Shared by both tray backends' "Open File Directory" menu items.
 #[cfg(feature = "gui")]
 fn open_file_directory() {
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .or_else(|| std::env::current_dir().ok());
+    let dir = paths::resolve_config_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(paths::data_dir);
 
-    if let Some(dir) = dir {
-        if let Err(e) = open::that_detached(&dir) {
-            tracing::error!("Failed to open directory {:?}: {e}", dir);
-        }
-    } else {
-        tracing::error!("Could not determine a directory to open");
+    if let Err(e) = open::that_detached(&dir) {
+        tracing::error!("Failed to open directory {:?}: {e}", dir);
     }
 }
 
@@ -536,6 +484,11 @@ fn run_linux_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::R
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             vec![
                 ksni::MenuItem::Standard(ksni::menu::StandardItem {
+                    label: "Open SonicBoom".to_string(),
+                    activate: Box::new(|_| open_application()),
+                    ..Default::default()
+                }),
+                ksni::MenuItem::Standard(ksni::menu::StandardItem {
                     label: "Open File Directory".to_string(),
                     activate: Box::new(|_| open_file_directory()),
                     ..Default::default()
@@ -578,6 +531,7 @@ fn run_linux_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::R
                     // tray with a dead server is worse than a visible exit.
                     tracing::error!("Server thread died: {err_msg}");
                     eprintln!("Server error: {err_msg}");
+                    show_startup_error(&err_msg);
                     std::process::exit(1);
                 }
                 if handle.is_closed() {
@@ -595,6 +549,7 @@ fn run_linux_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::R
                 if let Ok(err_msg) = server_err_rx.try_recv() {
                     tracing::error!("Server thread died: {err_msg}");
                     eprintln!("Server error: {err_msg}");
+                    show_startup_error(&err_msg);
                     std::process::exit(1);
                 }
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -609,6 +564,8 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
     let event_loop = EventLoopBuilder::new().build();
     let tray_menu = Menu::new();
 
+    let open_app_item = MenuItem::new("Open SonicBoom", true, None);
+    tray_menu.append(&open_app_item)?;
     let open_dir_item = MenuItem::new("Open File Directory", true, None);
     let quit_item = MenuItem::new("Close Process", true, None);
 
@@ -620,9 +577,8 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
     const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
     let icon = match image::load_from_memory(ICON_BYTES).map(|i| i.into_rgba8()) {
         Ok(image) => {
-            let (width, height) = image.dimensions();
             let rgba = image.into_raw();
-            tray_icon::Icon::from_rgba(rgba, width, height).ok()
+            tray_icon::Icon::from_rgba(rgba, image.width(), image.height()).ok()
         }
         Err(e) => {
             tracing::warn!("Failed to load embedded tray icon: {e}");
@@ -641,6 +597,7 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
         if let Ok(err_msg) = server_err_rx.try_recv() {
             tracing::error!("Server thread died: {err_msg}");
             eprintln!("Server error: {err_msg}");
+            show_startup_error(&err_msg);
             std::process::exit(1);
         }
 
@@ -672,7 +629,9 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
             tao::event::Event::MainEventsCleared => {
                 // Poll menu events every iteration
                 while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
-                    if menu_event.id == open_dir_item.id() {
+                    if menu_event.id == open_app_item.id() {
+                        open_application();
+                    } else if menu_event.id == open_dir_item.id() {
                         open_file_directory();
                     } else if menu_event.id == quit_item.id() {
                         let _ = tray_icon.take();
@@ -686,41 +645,109 @@ fn run_tao_tray(server_err_rx: std::sync::mpsc::Receiver<String>) -> anyhow::Res
     });
 }
 
-async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
-    // Fail closed on credential-store errors: a malformed or unreadable
-    // token file must never silently become an empty store. A missing file
-    // is initialized safely by `TokenStore::load`.
-    let token_store = Arc::new(
-        TokenStore::load(&config.token_store_path)
+async fn run_server(config_path: std::path::PathBuf) -> anyhow::Result<()> {
+    // Load + validate the configuration (bootstrap
+    // overrides for first-run are applied inside
+    // `ConfigManager::load`).
+    let config = Arc::new(
+        ConfigManager::load(config_path.clone())
             .await
             .map_err(|e| {
-                tracing::error!("Refusing to start: {e}");
-                e
+                tracing::error!("Configuration error: {e}");
+                anyhow::anyhow!("{e}")
             })?,
     );
 
-    // Resolve model trust early so a bad revision/manifest fails fast,
-    // before any download is attempted.
-    let (model_revision, expected_trust) =
-        tts::download::resolve_trust(&config.model_revision, config.model_hashes_path.as_deref())?;
-    let download_limits = tts::download::DownloadLimits::new(
-        config.model_download_connect_timeout_secs,
-        config.model_download_timeout_secs,
+    // The platform data directory (config.toml, secrets,
+    // models, logs, audio) is the root for lock files and
+    // default data locations.
+    let data_dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(paths::data_dir);
+
+    #[cfg(feature = "gui")]
+    ensure_gui_port(&config, &data_dir).await;
+
+    // Secrets live outside config.toml.
+    let secrets: Arc<dyn secrets::SecretStore> =
+        Arc::new(secrets::FileSecretStore::new(data_dir.join("secrets.json")));
+
+    let current = config.get().await;
+
+    // Fail closed on completed installs without a valid
+    // admin password (headless/server compatibility).
+    // First-run (bootstrap) mode defers password creation
+    // to the setup wizard.
+    if current.setup_complete {
+        let admin_pw = secrets::load_admin_password(secrets.as_ref())
+            .map_err(|e| anyhow::anyhow!("secret store error: {e}"))?
+            .unwrap_or_default();
+        config::validation::validate_admin_password(&admin_pw).map_err(|e| {
+            tracing::error!("Configuration error: {e}");
+            anyhow::anyhow!("{e}")
+        })?;
+    }
+
+    // Initialize logging
+    logging::init(
+        &current.paths.logs,
+        &current.logging.level,
+        current.logging.filter.as_deref(),
+        current.logging.to_file,
+        current.logging.to_stdout,
     );
 
-    if config.enable_sample_token {
+    // Log startup
+    logging::log_startup(current.server.port, &current.paths.logs);
+
+    tracing::info!(
+        admin_id = %current.admin.username,
+        auth_mode = ?current.server.auth_mode,
+        bind = %current.server.bind,
+        "Configuration loaded"
+    );
+
+    // Fail closed on credential-store errors: a malformed or unreadable
+    // token file must never silently become an empty store. A missing file
+    // is initialized safely by `TokenStore::load`.
+    let token_store = Arc::new(TokenStore::load(&current.paths.token_store).await.map_err(
+        |e| {
+            tracing::error!("Refusing to start: {e}");
+            e
+        },
+    )?);
+
+    // Resolve model trust early so a bad revision/manifest fails fast,
+    // before any download is attempted.
+    let hashes_path = current
+        .model
+        .hashes_path
+        .as_deref()
+        .map(|p| p.to_string_lossy().to_string());
+    let (_model_revision, _expected_trust) =
+        tts::download::resolve_trust(&current.model.revision, hashes_path.as_deref())?;
+    let download_limits = tts::download::DownloadLimits::new(
+        current.model.download_connect_timeout_secs,
+        current.model.download_timeout_secs,
+    );
+    let _ = download_limits;
+
+    if current.admin.enable_sample_token {
         tracing::warn!(
-            "ENABLE_SAMPLE_TOKEN is on: the development SAMPLE_TOKEN is accepted. \
+            "admin.enable_sample_token is on: the development SAMPLE_TOKEN is accepted. \
              Never enable this in production."
         );
     }
 
     let model_status = Arc::new(RwLock::new(ModelStatus::Idle));
+    let model_service = Arc::new(ModelService::new(Arc::clone(&model_status)));
 
     #[cfg(feature = "playback")]
     let audio_manager = match AudioManager::with_output_device(
-        config.max_playback_queue_items,
-        config.audio_output_device.clone(),
+        current.audio.max_playback_queue_items,
+        current.audio.output_device.clone(),
     ) {
         Ok(manager) => Arc::new(Some(manager)),
         Err(e) => {
@@ -729,11 +756,25 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         }
     };
 
+    #[cfg(feature = "playback")]
+    if let Some(audio) = audio_manager.as_ref() {
+        if let Err(error) = audio.set_volume(current.audio.volume).await {
+            config
+                .record_apply_failure(
+                    "audio.volume",
+                    serde_json::json!(current.audio.volume),
+                    serde_json::json!(1.0),
+                    &error.to_string(),
+                )
+                .await;
+        }
+    }
+
     // Prepare the temp playback directory (playback builds): ensure safe
     // ownership/permissions and sweep `<uuid>.wav` leftovers from an
     // unclean shutdown. Non-fatal — request-time checks fail closed.
     #[cfg(feature = "playback")]
-    match tts::queue::prepare_temp_dir(std::path::Path::new(&config.temp_audio_dir)) {
+    match tts::queue::prepare_temp_dir(std::path::Path::new(&current.paths.temp_audio)) {
         Ok(0) => {}
         Ok(reaped) => {
             tracing::info!("Swept {reaped} leftover temp audio file(s) on startup");
@@ -746,15 +787,15 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
     #[cfg(not(feature = "playback"))]
     let audio_manager = Arc::new(None);
 
-    let inference_gate = Arc::new(InferenceGate::new(
-        config.max_concurrent_inference,
-        config.max_pending_inference,
-    ));
-    let rate_limiter = Arc::new(RateLimiter::with_burst(
-        config.tts_rate_limit_requests,
-        config.tts_rate_limit_window_secs,
-        config.tts_rate_limit_burst,
-    ));
+    let inference_gate = Arc::new(InferenceGateManager::new(InferenceGate::new(
+        current.inference.max_concurrent,
+        current.inference.max_pending,
+    )));
+    let rate_limiter = Arc::new(RateLimiterManager::new(RateLimiter::with_burst(
+        current.rate_limit.requests,
+        current.rate_limit.window_secs,
+        current.rate_limit.burst,
+    )));
 
     let app_state = AppState {
         model_status: Arc::clone(&model_status),
@@ -763,6 +804,8 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         audio_manager,
         inference_gate,
         rate_limiter,
+        model_service: Arc::clone(&model_service),
+        secrets: Arc::clone(&secrets),
     };
 
     let lockout = Arc::new(LoginAttemptTracker::default());
@@ -770,115 +813,44 @@ async fn run_server(config: Arc<AppConfig>) -> anyhow::Result<()> {
         token_store: Arc::clone(&token_store),
         lockout: Arc::clone(&lockout),
         config: Arc::clone(&config),
+        secrets: Arc::clone(&secrets),
     };
 
-    // Hardened admin session cookie: HttpOnly, SameSite=Strict, optional
-    // Secure (enable via COOKIE_SECURE=true when serving HTTPS), and an
-    // inactivity expiry. Only the session id is stored client-side.
-    let session_store = MemoryStore::default();
-    let session_layer = SessionManagerLayer::new(session_store)
-        .with_name("sonicboom_admin")
-        .with_path("/")
-        .with_http_only(true)
-        .with_same_site(tower_sessions::cookie::SameSite::Strict)
-        .with_secure(config.cookie_secure)
-        .with_expiry(tower_sessions::Expiry::OnInactivity(
-            time::Duration::seconds(config.admin_session_expiry_secs),
-        ));
+    // Independently restartable HTTP listener.
+    let server = Arc::new(ApiServerManager::new(app_state.clone(), admin_state));
+    // Model download + load runs in the background.
+    let hf_token = secrets::load_hf_token(secrets.as_ref())
+        .map_err(|e| anyhow::anyhow!("secret store error: {e}"))?;
+    model_service.start_initial_load(&current.model, hf_token);
 
-    let request_timeout = config.request_timeout_secs;
+    // Runtime reconfiguration: every committed configuration
+    // change is applied to the live subsystems here.
+    let reconfigurator = Arc::new(runtime::RuntimeReconfigurator::new(
+        Arc::clone(&config),
+        Arc::clone(&app_state.audio_manager),
+        Arc::clone(&server),
+        Arc::clone(&model_service),
+        Arc::clone(&app_state.rate_limiter),
+        Arc::clone(&app_state.inference_gate),
+        Arc::clone(&secrets),
+    ));
+    tokio::spawn(reconfiguration_loop(
+        reconfigurator,
+        current.clone(),
+        config.subscribe(),
+    ));
 
-    let app = axum::Router::new()
-        .merge(web::router(app_state.clone()))
-        .merge(api::router(app_state.clone()))
-        .merge(admin::router(admin_state))
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&config),
-            security::security_headers,
-        ))
-        .layer(session_layer)
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(request_timeout),
-        ))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new())
-                .on_request(DefaultOnRequest::new())
-                .on_response(DefaultOnResponse::new())
-                .on_failure(DefaultOnFailure::new()),
-        );
+    // Hot reload: watch config.toml for external edits.
+    let _watcher = config::watcher::start_watching(Arc::clone(&config));
+    server.start().await?;
+    #[cfg(feature = "gui")]
+    if !current.setup_complete {
+        open_application();
+    }
 
-    let port = config.port;
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-
-    let model_cache_dir = config.model_cache_dir.clone();
-    let hf_token = config.hf_token.clone();
-    let model_status_bg = Arc::clone(&model_status);
-    tokio::spawn(async move {
-        *model_status_bg.write().await = ModelStatus::Downloading { progress: 0.0 };
-        let status_for_progress = Arc::clone(&model_status_bg);
-        match download::download_models_with_options(
-            std::path::Path::new(&model_cache_dir),
-            hf_token.as_deref(),
-            &model_revision,
-            &expected_trust,
-            &download_limits,
-            move |progress| {
-                if let Ok(mut status) = status_for_progress.try_write() {
-                    *status = ModelStatus::Downloading { progress };
-                }
-            },
-        )
-        .await
-        {
-            Ok(paths) => {
-                *model_status_bg.write().await = ModelStatus::Loading;
-                match tokio::task::spawn_blocking(move || ModelHandle::load(&paths)).await {
-                    Ok(Ok(handle)) => {
-                        tracing::info!("Model ready.");
-                        *model_status_bg.write().await = ModelStatus::Ready(Arc::new(handle));
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!("Model load error: {e}");
-                        *model_status_bg.write().await = ModelStatus::Failed(e.to_string());
-                    }
-                    Err(e) => {
-                        tracing::error!("Model load task panic: {e}");
-                        *model_status_bg.write().await = ModelStatus::Failed(e.to_string());
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("Model download error: {e}");
-                *model_status_bg.write().await = ModelStatus::Failed(e.to_string());
-            }
-        }
-    });
-
-    tracing::info!("Listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            anyhow::anyhow!(
-                "failed to bind {addr}: {e}. \
-                 Another SonicBoom instance may be running, or another app uses port {port}. \
-                 Set a different port with PORT=<free-port> \
-                 (dev: project-root '.env' or `export PORT=...`; \
-                 desktop gui: '.env' next to the executable; \
-                 docker: `-e PORT=...` with a matching `-p` publish)."
-            )
-        } else {
-            anyhow::anyhow!("failed to bind {addr}: {e}")
-        }
-    })?;
-
-    // Graceful shutdown on Ctrl+C / SIGTERM
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    // Wait for Ctrl+C / SIGTERM, then stop the listener.
+    shutdown_signal().await;
+    server.stop().await?;
 
     tracing::info!("Server shut down gracefully.");
     Ok(())
@@ -910,65 +882,11 @@ async fn shutdown_signal() {
 }
 
 #[cfg(all(test, feature = "gui"))]
-mod gui_env_tests {
-    use super::persist_env_value;
-
-    fn temp_env_path(tag: &str) -> std::path::PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "sonicboom-gui-env-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join(".env")
-    }
-
-    #[test]
-    fn creates_new_env_file_with_assignment() {
-        let path = temp_env_path("create");
-        let _ = std::fs::remove_file(&path);
-        persist_env_value(&path, "SONICBOOM_ADMIN_PW", "secret-value").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "SONICBOOM_ADMIN_PW=secret-value\n");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn replaces_existing_assignment_and_keeps_other_lines() {
-        let path = temp_env_path("replace");
-        std::fs::write(
-            &path,
-            "PORT=17842\nSONICBOOM_ADMIN_PW=old-value\nLOG_LEVEL=info\n",
-        )
-        .unwrap();
-        persist_env_value(&path, "SONICBOOM_ADMIN_PW", "new-value").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            content,
-            "PORT=17842\nSONICBOOM_ADMIN_PW=new-value\nLOG_LEVEL=info\n"
-        );
-        // Re-running keeps a single entry (no duplicates).
-        persist_env_value(&path, "SONICBOOM_ADMIN_PW", "newer-value").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            content.matches("SONICBOOM_ADMIN_PW=").count(),
-            1,
-            "duplicate entries: {content:?}"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn generated_password_satisfies_policy() {
-        let pw = crate::auth::token::generate_token_value();
-        assert!(pw.chars().count() >= crate::config::MIN_ADMIN_PASSWORD_LEN);
-        assert!(pw.chars().all(|c| c.is_ascii_hexdigit()));
-    }
+mod gui_tests {
+    use super::{GUI_LOCK_FILE, PortProbe, parse_lock_content, probe_port, select_gui_port};
 
     #[test]
     fn lock_content_round_trips() {
-        use super::{GUI_LOCK_FILE, parse_lock_content};
         assert_eq!(GUI_LOCK_FILE, "sonicboom.lock");
         let text = format!("pid={} port={}\n", std::process::id(), 17843);
         assert_eq!(parse_lock_content(&text), Some((std::process::id(), 17843)));
@@ -976,7 +894,6 @@ mod gui_env_tests {
 
     #[test]
     fn lock_parse_rejects_garbage() {
-        use super::parse_lock_content;
         for bad in [
             "",
             "pid=abc port=17842\n",
@@ -991,7 +908,6 @@ mod gui_env_tests {
 
     #[test]
     fn occupied_port_is_skipped_by_selection() {
-        use super::{PortProbe, probe_port, select_gui_port};
         // Hold a port so the scanner must skip it.
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let occupied = held.local_addr().unwrap().port();
@@ -1004,5 +920,67 @@ mod gui_env_tests {
         assert_ne!(picked, occupied, "scanner did not skip held port");
         assert_eq!(probe_port(picked), PortProbe::Free);
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_config_bootstraps_a_missing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "sonicboom-prepare-test-{}-{}",
+            std::process::id(),
+            "bootstrap"
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let config_path = dir.join("config.toml");
+        let outcome = prepare_config(&config_path).expect("bootstrap must succeed");
+        assert!(matches!(outcome, PrepareOutcome::FirstRun));
+        let config_path2 = config_path.clone();
+        let parsed = std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|text| config::loader::parse_toml(&text).ok())
+            .expect("bootstrap file must parse");
+        assert!(!parsed.setup_complete);
+        // Platform data dirs are referenced, not relative defaults.
+        assert!(
+            !parsed.model.cache_dir.to_string_lossy().starts_with("./"),
+            "bootstrap should use platform dirs: {:?}",
+            parsed.model.cache_dir
+        );
+        // Idempotent: a second run sees the existing file.
+        assert!(matches!(
+            prepare_config(&config_path2).expect("second run must succeed"),
+            PrepareOutcome::Ready
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_mode_forces_loopback_local_auth() {
+        let dir = std::env::temp_dir().join(format!(
+            "sonicboom-bootstrap-{}-{}",
+            std::process::id(),
+            "auth"
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let config_path = dir.join("config.toml");
+        // A first-run config with an unsafe bind/auth, as if
+        // hand-edited: bootstrap must override both in memory.
+        // Written raw (not through the validating atomic
+        // writer) to simulate an external edit.
+        std::fs::write(
+            &config_path,
+            "setup_complete = false\n\n[server]\nbind = \"0.0.0.0\"\nauth_mode = \"none\"\n",
+        )
+        .unwrap();
+        let manager = ConfigManager::load(config_path.clone()).await.unwrap();
+        let config = manager.get().await;
+        assert!(config.server.bind.is_loopback());
+        assert_eq!(config.server.auth_mode, config::model::AuthMode::Local);
+        assert!(!config.setup_complete);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

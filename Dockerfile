@@ -213,6 +213,8 @@ RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
 ENV LD_LIBRARY_PATH=/app/ort-lib:/app
 ENV RUST_LOG=info
 ENV PORT=17842
+ENV BIND=0.0.0.0
+ENV SONICBOOM_CONFIG=/app/data/config.toml
 ENV MODEL_CACHE_DIR=/app/models
 ENV LOG_DIR=/app/logs
 ENV TOKEN_STORE_PATH=/app/data/tokens.json
@@ -259,6 +261,8 @@ RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
 ENV LD_LIBRARY_PATH=/app/ort-lib:/app
 ENV RUST_LOG=info
 ENV PORT=17842
+ENV BIND=0.0.0.0
+ENV SONICBOOM_CONFIG=/app/data/config.toml
 ENV MODEL_CACHE_DIR=/app/models
 ENV LOG_DIR=/app/logs
 ENV TOKEN_STORE_PATH=/app/data/tokens.json
@@ -306,6 +310,8 @@ RUN mkdir -p /app/models /app/logs /app/data /app/temp_audio \
 ENV LD_LIBRARY_PATH=/app/ort-lib:/app
 ENV RUST_LOG=info
 ENV PORT=17842
+ENV BIND=0.0.0.0
+ENV SONICBOOM_CONFIG=/app/data/config.toml
 ENV MODEL_CACHE_DIR=/app/models
 ENV LOG_DIR=/app/logs
 ENV TOKEN_STORE_PATH=/app/data/tokens.json

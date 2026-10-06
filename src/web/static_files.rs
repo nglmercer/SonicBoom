@@ -24,6 +24,14 @@ pub async fn get_static(Path(file): Path<String>) -> Response {
                 ADMIN_CSS
             },
         ),
+        "setup.js" => (
+            "application/javascript; charset=utf-8",
+            include_bytes!("../../static/setup.js").as_slice(),
+        ),
+        "setup.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../../static/setup.css").as_slice(),
+        ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     (
