@@ -5,7 +5,7 @@ import { t } from '../../i18n';
 import { cspNonce } from '../../app/csp';
 
 const props = withDefaults(defineProps<{ blob: Blob | null; label: string; compact?: boolean; autoplay?: boolean }>(), { compact: false, autoplay: false });
-const emit = defineEmits<{ progress: [position: number, duration: number]; play: []; pause: []; ended: []; ready: [duration: number]; error: [message: string] }>();
+const emit = defineEmits<{ play: []; pause: []; ended: []; ready: [duration: number]; error: [message: string] }>();
 
 const host = ref<HTMLElement | null>(null);
 const instance = shallowRef<WaveSurfer | null>(null);
@@ -65,7 +65,7 @@ function load() {
   wavesurfer.on('play', () => { playing.value = true; emit('play'); });
   wavesurfer.on('pause', () => { playing.value = false; emit('pause'); });
   wavesurfer.on('finish', () => { playing.value = false; emit('ended'); });
-  wavesurfer.on('timeupdate', time => { position.value = time; emit('progress', time, total.value); });
+  wavesurfer.on('timeupdate', time => { position.value = time; });
   wavesurfer.on('error', error => { problem.value = error.message; emit('error', error.message); });
   void wavesurfer.loadBlob(blob).catch((error: Error) => { problem.value = error.message; emit('error', error.message); });
 }
@@ -83,8 +83,6 @@ function seek(seconds: number) {
   player.setTime(Math.min(Math.max(0, seconds), total.value || seconds));
   position.value = player.getCurrentTime();
 }
-
-function stop() { instance.value?.pause(); seek(0); }
 
 function onKeydown(event: KeyboardEvent) {
   const step = event.shiftKey ? 10 : 5;
@@ -110,7 +108,7 @@ onMounted(() => {
 watch(() => props.blob, load);
 watch(() => props.compact, load);
 onBeforeUnmount(() => { themeWatcher?.disconnect(); themeWatcher = null; destroy(); });
-defineExpose({ play: () => instance.value?.play(), pause: () => instance.value?.pause(), toggle, stop, seekTo: seek, getCurrentTime: () => position.value, getDuration: () => total.value });
+defineExpose({ play: () => instance.value?.play(), pause: () => instance.value?.pause(), toggle, seekTo: seek, getDuration: () => total.value });
 </script>
 <template>
   <div class="waveform-player" :class="{ compact }">
@@ -120,10 +118,7 @@ defineExpose({ play: () => instance.value?.play(), pause: () => instance.value?.
         <svg v-if="playing" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></svg>
         <svg v-else viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.87l11-6.5a1 1 0 0 0 0-1.74l-11-6.5A1 1 0 0 0 8 5.5Z"/></svg>
       </button>
-      <button type="button" :disabled="!total" @click="seek(position - 10)">{{ t('Back 10 seconds') }}</button>
-      <button type="button" :disabled="!total" @click="seek(position + 10)">{{ t('Forward 10 seconds') }}</button>
-      <button type="button" :disabled="!total" @click="stop">{{ t('Stop audio') }}</button>
-      <p class="player-time">{{ sliderLabel }} <span v-if="total">· {{ t('Duration: {seconds} s', { seconds: total.toFixed(2) }) }}</span></p>
+      <p class="player-time">{{ sliderLabel }}</p>
     </div>
     <p v-if="problem" class="field-error" role="alert">{{ problem }}</p>
   </div>
