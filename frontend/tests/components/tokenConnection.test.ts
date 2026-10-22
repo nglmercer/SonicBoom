@@ -1,0 +1,28 @@
+import { it, expect, vi, afterEach } from 'vitest';
+import { mount, flushPromises } from '@vue/test-utils';
+import { ref } from 'vue';
+import Home from '../../src/pages/Home.vue';
+import { createStudio } from '../../src/composables/useStudio';
+import { createApi } from '../../src/services/api';
+vi.mock('../../src/composables/useStudio', () => ({ studioKey: Symbol(), createStudio: vi.fn() }));
+vi.mock('../../src/services/api', () => ({ createApi: vi.fn() }));
+vi.mock('../../src/components/studio/SpeechGenerator.vue', () => ({ default: { template: '<div/>' } }));
+vi.mock('../../src/components/StudioLayout.vue', () => ({ default: { template: '<div><slot name="notice"/></div>' } }));
+afterEach(() => { sessionStorage.clear(); });
+it('validates before connecting, keeps secrets opt-in and disconnects cleanly', async () => {
+  const token = ref('');
+  vi.mocked(createStudio).mockReturnValue({ token, info: ref({ auth: { required: true }, model: { status: 'ready' } }), loading: ref(false), errors: ref({}) } as any);
+  const validate = vi.fn().mockRejectedValueOnce(new Error('Invalid token')).mockResolvedValue([]);
+  vi.mocked(createApi).mockReturnValue({ voices: validate } as any);
+  const wrapper = mount(Home, { props: { data: { providers: [], voices: [] } as any } });
+  await wrapper.find('#apiToken').setValue('  Bearer example-token  ');
+  await wrapper.find('form').trigger('submit'); await flushPromises();
+  expect(token.value).toBe(''); expect(wrapper.find('[role="alert"]').exists()).toBe(true);
+  await wrapper.find('input[type="checkbox"]').setValue(true);
+  await wrapper.find('form').trigger('submit'); await flushPromises();
+  expect(token.value).toBe('example-token'); expect(wrapper.text()).toContain('Token connected');
+  expect(sessionStorage.getItem('sonicboom.apiToken')).toBe('example-token');
+  await wrapper.findAll('button').find(button => button.text() === 'Disconnect token')!.trigger('click');
+  expect(token.value).toBe(''); expect(sessionStorage.getItem('sonicboom.apiToken')).toBeNull();
+  wrapper.unmount();
+});

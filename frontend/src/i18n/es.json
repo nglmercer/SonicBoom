@@ -657,5 +657,14 @@
   "Too short: the engine needs at least {min} s.": "Demasiado corta: el motor necesita al menos {min} s.",
   "Too long: the engine accepts at most {max} s.": "Demasiado larga: el motor acepta como máximo {max} s.",
   "Play": "Reproducir",
-  "Pause": "Pausa"
+  "Pause": "Pausa",
+  "Back 10 seconds": "Retroceder 10 segundos",
+  "Forward 10 seconds": "Avanzar 10 segundos",
+  "Stop audio": "Detener audio",
+  "Duration: {seconds} s": "Duración: {seconds} s",
+  "Token connected": "Token conectado",
+  "Remember token in this tab": "Recordar token en esta pestaña",
+  "Connecting…": "Conectando…",
+  "Connect token": "Conectar token",
+  "Disconnect token": "Desconectar token"
 }

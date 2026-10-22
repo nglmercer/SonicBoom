@@ -657,5 +657,14 @@
   "Too short: the engine needs at least {min} s.": "Too short: the engine needs at least {min} s.",
   "Too long: the engine accepts at most {max} s.": "Too long: the engine accepts at most {max} s.",
   "Play": "Play",
-  "Pause": "Pause"
+  "Pause": "Pause",
+  "Back 10 seconds": "Back 10 seconds",
+  "Forward 10 seconds": "Forward 10 seconds",
+  "Stop audio": "Stop audio",
+  "Duration: {seconds} s": "Duration: {seconds} s",
+  "Token connected": "Token connected",
+  "Remember token in this tab": "Remember token in this tab",
+  "Connecting…": "Connecting…",
+  "Connect token": "Connect token",
+  "Disconnect token": "Disconnect token"
 }
