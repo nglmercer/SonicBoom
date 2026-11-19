@@ -1,0 +1,21 @@
+[package]
+name = "moshi"
+version = "0.6.4"
+edition = "2021"
+description = "Kyutai moshi-core (vendored, adapted to the nglmercer/candle fork)"
+license = "MIT/Apache-2.0"
+repository = "https://github.com/kyutai-labs/moshi"
+
+[dependencies]
+candle = { path = "../candle/candle-core", package = "candle-core" }
+candle-nn = { path = "../candle/candle-nn" }
+candle-transformers = { path = "../candle/candle-transformers" }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+
+[features]
+default = []
+vulkan = ["candle/vulkan", "candle-nn/vulkan", "candle-transformers/vulkan"]
+
+[workspace]

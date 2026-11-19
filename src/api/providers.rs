@@ -18,6 +18,34 @@ fn parse_device(raw: &str) -> DevicePreference {
     DevicePreference::parse(raw).unwrap_or(DevicePreference::Auto)
 }
 
+/// Map `[providers.qwen3_candle]` / `[providers.kyutai_candle]` to the runtime config.
+#[cfg(any(feature = "candle-qwen", feature = "candle-kyutai"))]
+pub fn map_candle_config(
+    c: &crate::config::model::CandleProviderConfig,
+) -> sonicboom::tts::providers::candle_models::CandleProviderConfig {
+    sonicboom::tts::providers::candle_models::CandleProviderConfig {
+        enabled: c.enabled,
+        model_dir: crate::config::paths::resolve_model_dir(&c.model_dir),
+        voices_dir: crate::config::paths::resolve_model_dir(&c.voices_dir),
+        default_voice: c.default_voice.clone(),
+        device: c.device.trim().to_ascii_lowercase(),
+        download: c.download,
+    }
+}
+
+/// Sync both candle providers from the live configuration.
+pub fn sync_candle_providers(
+    pool: &sonicboom::tts::providers::ProviderPool,
+    providers: &crate::config::model::ProvidersConfig,
+) {
+    #[cfg(feature = "candle-qwen")]
+    pool.sync_qwen_candle_config(map_candle_config(&providers.qwen3_candle));
+    #[cfg(feature = "candle-kyutai")]
+    pool.sync_kyutai_candle_config(map_candle_config(&providers.kyutai_candle));
+    #[cfg(not(any(feature = "candle-qwen", feature = "candle-kyutai")))]
+    let _ = (pool, providers);
+}
+
 #[cfg(feature = "qwen-gguf")]
 pub fn map_qwen_gguf_config(
     gguf: &crate::config::model::Qwen3GgufConfig,
@@ -82,6 +110,7 @@ pub fn build_registry(
     pool.sync_pocket_config(map_pocket_config(&config.providers.pocket_tts));
     #[cfg(feature = "qwen-gguf")]
     pool.sync_gguf_config(map_qwen_gguf_config(&config.providers.qwen3_gguf));
+    sync_candle_providers(pool, &config.providers);
     // Hot-reload path: no HF token at request time (public bundles need
     // none; gated bundles report an explicit auth error in status).
     pool.kick_ensure_if_needed(None);
@@ -104,6 +133,7 @@ pub async fn build_registry_for_state(state: &crate::AppState) -> TtsProviderReg
     state
         .providers
         .sync_gguf_config(map_qwen_gguf_config(&config.providers.qwen3_gguf));
+    sync_candle_providers(&state.providers, &config.providers);
     state.providers.kick_ensure_if_needed(None);
     let supertonic = Arc::new(SupertonicProvider::new(config.model.cache_dir.clone()));
     if let Some(handle) = supertonic_handle(state).await {
@@ -135,6 +165,14 @@ pub async fn get_providers(
     .into_iter()
     .chain(
         cfg!(feature = "qwen-gguf").then(|| registry.get("qwen3-gguf").map(|p| p.capabilities())),
+    )
+    .chain(
+        cfg!(feature = "candle-qwen")
+            .then(|| registry.get("qwen3-candle").map(|p| p.capabilities())),
+    )
+    .chain(
+        cfg!(feature = "candle-kyutai")
+            .then(|| registry.get("kyutai-candle").map(|p| p.capabilities())),
     )
     .collect::<Vec<_>>();
     let body = serde_json::json!({
@@ -219,15 +257,18 @@ mod tests {
         assert!(!registry.provider_ids().contains(&"qwen3".to_string()));
         // GPT-SoVITS is retired: it must never appear as a provider id.
         assert!(!registry.provider_ids().contains(&"gpt-sovits".to_string()));
+        let mut expected = vec!["pocket-tts".to_string(), "supertonic".to_string()];
         #[cfg(feature = "qwen-gguf")]
-        assert_eq!(
-            registry.provider_ids(),
-            vec!["pocket-tts", "qwen3-gguf", "supertonic"]
-        );
-        #[cfg(not(feature = "qwen-gguf"))]
-        assert_eq!(registry.provider_ids(), vec!["pocket-tts", "supertonic"]);
+        expected.push("qwen3-gguf".to_string());
+        #[cfg(feature = "candle-qwen")]
+        expected.push("qwen3-candle".to_string());
+        #[cfg(feature = "candle-kyutai")]
+        expected.push("kyutai-candle".to_string());
+        expected.sort();
+        assert_eq!(registry.provider_ids(), expected);
         for status in registry.statuses() {
             if status.provider_id == "supertonic" {
+                // No model loaded in this test: the engine device is still the CPU default.
                 assert_eq!(status.effective_device.as_deref(), Some("cpu"));
             } else {
                 // Optional providers are disabled by default.

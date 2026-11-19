@@ -792,17 +792,16 @@ async fn post_clones_inner(
     }
     let provider = query.provider.trim().to_ascii_lowercase();
     // The Candle provider is gone: Qwen cloning means the GGUF/ONNX backend.
-    #[cfg(feature = "qwen-gguf")]
-    let cloning = provider == "qwen3-gguf" || provider == "pocket-tts";
-    #[cfg(not(feature = "qwen-gguf"))]
-    let cloning = provider == "pocket-tts";
+    let cloning = provider == "pocket-tts"
+        || (cfg!(feature = "qwen-gguf") && provider == "qwen3-gguf")
+        || (cfg!(feature = "candle-qwen") && provider == "qwen3-candle");
     if !cloning {
         return Err(AppError::BadRequest(format!(
             "unsupported provider '{}' for voice cloning \
              (expected one of: {}; supertonic uses built-in style voices)",
             query.provider,
-            if cfg!(feature = "qwen-gguf") {
-                "qwen3-gguf, pocket-tts"
+            if cfg!(feature = "qwen-gguf") || cfg!(feature = "candle-qwen") {
+                "qwen3-gguf, qwen3-candle, pocket-tts"
             } else {
                 "pocket-tts"
             }
@@ -920,6 +919,15 @@ async fn post_clones_inner(
             sonicboom::tts::providers::pocket_tts::PocketTtsProvider::validate_reference(&pcm, rate)
                 .map_err(provider_error_to_app)?
         }
+        "qwen3-candle" => {
+            // Same bounds as a usable clone reference: 1-30 s of audio.
+            let secs = pcm.len() as f64 / f64::from(rate.max(1));
+            if !(1.0..=30.0).contains(&secs) {
+                return Err(AppError::BadRequest(format!(
+                    "reference audio must be 1-30 seconds long (got {secs:.1}s)"
+                )));
+            }
+        }
         _ => {}
     }
     if state.config.get().await.revision != config.revision {
@@ -973,6 +981,8 @@ pub(crate) fn config_revision_for(
         #[cfg(feature = "qwen-gguf")]
         "qwen3-gguf" => sonicboom::tts::providers::qwen_gguf::models::REVISION.to_string(),
         "pocket-tts" => config.providers.pocket_tts.revision.clone(),
+        // Candle bundles are operator-managed directories, not pinned downloads.
+        "qwen3-candle" => "candle-safetensors".to_string(),
         // Retired providers (GPT-SoVITS) and anything unknown: a revision
         // that matches nothing, so legacy profiles fail closed with an
         // explicit retired/incompatible error instead of being reused.

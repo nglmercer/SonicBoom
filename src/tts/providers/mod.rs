@@ -6,6 +6,8 @@
 //! in-process worker threads with bounded channels, never subprocesses.
 
 pub mod assets;
+#[cfg(any(feature = "candle-qwen", feature = "candle-kyutai"))]
+pub mod candle_models;
 pub mod catalog;
 pub mod error;
 pub mod pocket_tts;

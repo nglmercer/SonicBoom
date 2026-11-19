@@ -318,6 +318,21 @@ impl JobStore {
     }
 }
 
+impl JobQuery {
+    /// `true` when the request explicitly selects `provider` (always `false` without playback).
+    fn provider_is(&self, id: &str) -> bool {
+        #[cfg(feature = "playback")]
+        {
+            self.provider.as_deref().map(str::trim) == Some(id)
+        }
+        #[cfg(not(feature = "playback"))]
+        {
+            let _ = id;
+            false
+        }
+    }
+}
+
 #[derive(Deserialize, Default)]
 pub struct JobQuery {
     pub voice: Option<String>,
@@ -689,6 +704,28 @@ async fn execute_request(
             reading_style: query.reading_style.clone(),
         };
         super::voices::post_preview_prepared(token, state, profile, preview, body, speech).await
+    } else if cfg!(feature = "playback")
+        && query.provider_is("kyutai-candle")
+    {
+        #[cfg(feature = "playback")]
+        {
+            let language = query.lang.clone().unwrap_or_else(|| "en".to_string());
+            let voice = query.voice.clone().unwrap_or_default();
+            return with_admission(
+                &state,
+                super::tts::post_named_voice_prepared(
+                    &state,
+                    sonicboom::tts::providers::catalog::KYUTAI_CANDLE_MODELS[0],
+                    &voice,
+                    language,
+                    query.format.as_deref(),
+                    speech,
+                ),
+            )
+            .await;
+        }
+        #[cfg(not(feature = "playback"))]
+        unreachable!("provider routing needs the playback feature")
     } else {
         // Supertonic path: sampling/quality options are meaningless here and
         // are rejected explicitly rather than silently ignored.
@@ -2031,6 +2068,7 @@ mod normalization_tests {
                 devices: vec!["cpu".into()],
                 requires_reference_audio: true,
                 requires_reference_transcript: true,
+                voices: vec![],
                 sample_rate: Some(24_000),
             }
         }

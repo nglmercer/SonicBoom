@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Result, anyhow};
 
 use crate::tts::{
+    backend::BackendChoice,
     audio, download, inference,
     model::ModelHandle,
     normalization::{NormalizeError, NormalizeLimits, NormalizeOptions, ReadingStyle},
@@ -36,6 +37,9 @@ pub struct EngineConfig {
     /// How written numbers and times are read. Defaults to
     /// [`ReadingStyle::Precise`], the compatibility style.
     pub reading_style: ReadingStyle,
+    /// Inference engine for the Supertonic graphs; `auto` resolves per build
+    /// (candle when compiled in, otherwise ONNX Runtime).
+    pub backend: BackendChoice,
 }
 
 impl EngineConfig {
@@ -49,6 +53,7 @@ impl EngineConfig {
             normalization: NormalizationMode::Auto,
             locale: None,
             reading_style: ReadingStyle::default(),
+            backend: BackendChoice::auto(),
         }
     }
 }
@@ -363,6 +368,7 @@ impl SonicBoomEngine {
         // an explicit trusted manifest for that exact revision.
         let (revision, expected_trust) =
             download::resolve_trust(&revision, custom_manifest.as_deref())?;
+        let backend = config.backend;
         let normalization = config.normalization;
         let locale = config.locale.clone();
         let reading_style = config.reading_style;
@@ -375,7 +381,7 @@ impl SonicBoomEngine {
             on_progress,
         )
         .await?;
-        let model = tokio::task::spawn_blocking(move || ModelHandle::load(&paths))
+        let model = tokio::task::spawn_blocking(move || ModelHandle::load_with(&paths, backend))
             .await
             .map_err(|error| anyhow!("model loading task failed: {error}"))??;
         Ok(Arc::new(Self {

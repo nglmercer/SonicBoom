@@ -13,6 +13,12 @@ use super::TtsProviderRegistry;
 use super::pocket_tts::{PocketTtsConfig, PocketTtsProvider};
 #[cfg(feature = "qwen-gguf")]
 use super::qwen_gguf::provider::{QwenGgufConfig, QwenGgufProvider};
+#[cfg(feature = "candle-kyutai")]
+use super::candle_models::kyutai::CandleKyutaiProvider;
+#[cfg(feature = "candle-qwen")]
+use super::candle_models::qwen::CandleQwenProvider;
+#[cfg(any(feature = "candle-qwen", feature = "candle-kyutai"))]
+use super::candle_models::CandleProviderConfig;
 use super::supertonic::SupertonicProvider;
 
 type DesiredProviders = Option<(u64, PocketTtsConfig)>;
@@ -27,6 +33,12 @@ pub struct ProviderPool {
     /// reference conditioning). Compiled only with `qwen-gguf`.
     #[cfg(feature = "qwen-gguf")]
     pub qwen_gguf: Arc<QwenGgufProvider>,
+    /// Qwen3-TTS on candle (`candle-qwen` builds).
+    #[cfg(feature = "candle-qwen")]
+    pub qwen_candle: Arc<CandleQwenProvider>,
+    /// Kyutai TTS on candle (`candle-kyutai` builds).
+    #[cfg(feature = "candle-kyutai")]
+    pub kyutai_candle: Arc<CandleKyutaiProvider>,
 }
 
 impl Default for ProviderPool {
@@ -37,6 +49,10 @@ impl Default for ProviderPool {
             pocket: PocketTtsProvider::new(PocketTtsConfig::default()),
             #[cfg(feature = "qwen-gguf")]
             qwen_gguf: QwenGgufProvider::new(QwenGgufConfig::default()),
+            #[cfg(feature = "candle-qwen")]
+            qwen_candle: CandleQwenProvider::new(CandleProviderConfig::default()),
+            #[cfg(feature = "candle-kyutai")]
+            kyutai_candle: CandleKyutaiProvider::new(CandleProviderConfig::default()),
         }
     }
 }
@@ -62,6 +78,18 @@ impl ProviderPool {
     #[cfg(feature = "qwen-gguf")]
     pub fn sync_gguf_config(&self, gguf: QwenGgufConfig) {
         self.qwen_gguf.sync_config(gguf);
+    }
+
+    /// Sync the candle Qwen3-TTS provider configuration.
+    #[cfg(feature = "candle-qwen")]
+    pub fn sync_qwen_candle_config(&self, config: CandleProviderConfig) {
+        self.qwen_candle.sync_config(config);
+    }
+
+    /// Sync the candle Kyutai TTS provider configuration.
+    #[cfg(feature = "candle-kyutai")]
+    pub fn sync_kyutai_candle_config(&self, config: CandleProviderConfig) {
+        self.kyutai_candle.sync_config(config);
     }
 
     /// Reject request-scoped snapshots older than the most recently adopted
@@ -128,7 +156,11 @@ impl ProviderPool {
     pub fn kick_ensure_if_needed(&self, hf_token: Option<String>) {
         self.pocket.kick_ensure_if_needed(hf_token.clone());
         #[cfg(feature = "qwen-gguf")]
-        self.qwen_gguf.kick_ensure_if_needed(hf_token);
+        self.qwen_gguf.kick_ensure_if_needed(hf_token.clone());
+        #[cfg(feature = "candle-qwen")]
+        self.qwen_candle.kick_ensure_if_needed(hf_token.clone());
+        #[cfg(feature = "candle-kyutai")]
+        self.kyutai_candle.kick_ensure_if_needed(hf_token);
     }
 
     /// Build a request-scoped registry around the resident singletons plus
@@ -139,6 +171,10 @@ impl ProviderPool {
         registry.register(Arc::clone(&self.pocket) as Arc<dyn super::TtsProvider>);
         #[cfg(feature = "qwen-gguf")]
         registry.register(Arc::clone(&self.qwen_gguf) as Arc<dyn super::TtsProvider>);
+        #[cfg(feature = "candle-qwen")]
+        registry.register(Arc::clone(&self.qwen_candle) as Arc<dyn super::TtsProvider>);
+        #[cfg(feature = "candle-kyutai")]
+        registry.register(Arc::clone(&self.kyutai_candle) as Arc<dyn super::TtsProvider>);
         registry
     }
 }
@@ -171,13 +207,15 @@ mod tests {
         // GPT-SoVITS is retired: no "gpt-sovits" id may appear.
         assert!(!registry.provider_ids().contains(&"qwen3".to_string()));
         assert!(!registry.provider_ids().contains(&"gpt-sovits".to_string()));
+        let mut expected = vec!["pocket-tts".to_string(), "supertonic".to_string()];
         #[cfg(feature = "qwen-gguf")]
-        assert_eq!(
-            registry.provider_ids(),
-            vec!["pocket-tts", "qwen3-gguf", "supertonic"]
-        );
-        #[cfg(not(feature = "qwen-gguf"))]
-        assert_eq!(registry.provider_ids(), vec!["pocket-tts", "supertonic"]);
+        expected.push("qwen3-gguf".to_string());
+        #[cfg(feature = "candle-qwen")]
+        expected.push("qwen3-candle".to_string());
+        #[cfg(feature = "candle-kyutai")]
+        expected.push("kyutai-candle".to_string());
+        expected.sort();
+        assert_eq!(registry.provider_ids(), expected);
     }
 
     #[test]

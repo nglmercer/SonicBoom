@@ -696,6 +696,83 @@ pub fn schema() -> BTreeMap<String, SettingSchema> {
         allowed_values_source: None,
     });
     add(SettingSchema {
+        path: "model.backend".to_string(),
+        description: "Supertonic inference engine: auto (candle when compiled in, else ort), ort, candle-cpu or candle-vulkan"
+            .to_string(),
+        type_name: "string",
+        apply: ApplyStrategy::ReloadModel,
+        min: None,
+        max: None,
+        allowed_values: Some(vec![
+            "auto".to_string(),
+            "ort".to_string(),
+            "candle-cpu".to_string(),
+            "candle-vulkan".to_string(),
+        ]),
+        nullable: false,
+        secret: false,
+        allowed_values_source: None,
+    });
+    for provider in ["qwen3_candle", "kyutai_candle"] {
+        add(SettingSchema {
+            path: format!("providers.{provider}.download"),
+            description: format!(
+                "Download and SHA-256 verify the pinned {provider} bundle into model_dir (false: use files you manage)"
+            ),
+            type_name: "boolean",
+            apply: ApplyStrategy::Hot,
+            min: None,
+            max: None,
+            allowed_values: None,
+            nullable: false,
+            secret: false,
+            allowed_values_source: None,
+        });
+        add(SettingSchema {
+            path: format!("providers.{provider}.enabled"),
+            description: format!("Enable the {provider} voice provider (default false)"),
+            type_name: "boolean",
+            apply: ApplyStrategy::Hot,
+            min: None,
+            max: None,
+            allowed_values: None,
+            nullable: false,
+            secret: false,
+            allowed_values_source: None,
+        });
+        add(SettingSchema {
+            path: format!("providers.{provider}.device"),
+            description: format!("{provider} device: auto (Vulkan when compiled in), cpu or vulkan"),
+            type_name: "string",
+            apply: ApplyStrategy::Hot,
+            min: None,
+            max: None,
+            allowed_values: Some(vec!["auto".to_string(), "cpu".to_string(), "vulkan".to_string()]),
+            nullable: false,
+            secret: false,
+            allowed_values_source: None,
+        });
+    }
+    for (path, desc) in [
+        ("providers.qwen3_candle.model_dir", "Directory with the Qwen3-TTS Base safetensors bundle (config.json, model.safetensors, speech_tokenizer/)"),
+        ("providers.kyutai_candle.model_dir", "Directory with the Kyutai TTS 1.6B en/fr bundle"),
+        ("providers.kyutai_candle.voices_dir", "Directory with kyutai/tts-voices embeddings (<voice>.safetensors)"),
+        ("providers.kyutai_candle.default_voice", "Kyutai voice used when a request does not name one"),
+    ] {
+        add(SettingSchema {
+            path: path.to_string(),
+            description: desc.to_string(),
+            type_name: "string",
+            apply: ApplyStrategy::Hot,
+            min: None,
+            max: None,
+            allowed_values: None,
+            nullable: false,
+            secret: false,
+            allowed_values_source: None,
+        });
+    }
+    add(SettingSchema {
         path: "providers.qwen3_gguf.enabled".to_string(),
         description: "Enable the Qwen3-TTS GGUF/ONNX voice-cloning provider (default false)"
             .to_string(),

@@ -496,3 +496,44 @@ Use the authenticated [background job API](inference-jobs.md) for long CPU
 inference, with progress and cooperative cancellation. The synchronous routes
 remain supported. See [ownership/cache architecture](inference-architecture.md)
 for model residency, integrity verification, reloads and cache bounds.
+
+## Candle engine (`candle` migration)
+
+Default builds include the candle engine (the `nglmercer/candle` fork, vendored in `vendor/candle`).
+Features: `candle` (Supertonic graphs on candle), `candle-vulkan` (adds the Vulkan device; needs
+`slangc` at build time), `candle-qwen` (provider `qwen3-candle`), `candle-kyutai` (provider
+`kyutai-candle`). `model.backend = "ort"` keeps ONNX Runtime for Supertonic. See
+`docs/candle-benchmark-report.md` for measured performance and trade-offs.
+
+```toml
+[model]
+# auto = candle-cpu when the build includes `candle`, otherwise ort.
+# One of: auto | ort | candle-cpu | candle-vulkan. Changing it reloads the model.
+backend = "auto"
+
+[providers.qwen3_candle]        # Qwen3-TTS 0.6B/1.7B Base safetensors, voice cloning
+enabled = false
+model_dir = "models/qwen3-tts-candle"   # config.json, model.safetensors, speech_tokenizer/
+device = "auto"                          # auto | cpu | vulkan
+download = true                          # fetch + SHA-256 verify the pinned 1.7B Base bundle (~4.5 GB)
+
+[providers.kyutai_candle]       # Kyutai TTS 1.6B en/fr, named voices
+enabled = false
+model_dir = "models/kyutai-tts"
+voices_dir = "models/kyutai-tts/voices"  # <voice>.safetensors from kyutai/tts-voices
+default_voice = "calm"                   # "calm" is fetched automatically; other voices: add <name>.safetensors
+device = "auto"
+download = true                          # fetch + verify the pinned bundle (~4.1 GB) and the calm voice
+```
+
+* `MODEL_BACKEND` overrides `model.backend`.
+* With `download = true` an enabled provider fetches its pinned bundle (Hugging Face revision,
+  SHA-256 and size verified, atomic installs, re-used on restart) in the background and then loads
+  it; progress is in `/api/providers` (`detail: "downloading model files (N%)"`). With
+  `download = false` it uses whatever is in `model_dir` and reports `not_installed` if the files
+  are missing. A configuration change during a download cancels it.
+* `kyutai-tts-1.6b-en-fr` is used through `/v1/audio/speech` with `voice` set to a file stem in
+  `voices_dir` (no voice profile). `qwen3-tts-candle` uses voice profiles like the other cloning
+  providers (create one with `provider = qwen3-candle`).
+* Vulkan runs Kyutai in BF16 and needs about 4 GiB of device memory; F16/F32/Q8 are not usable
+  for these checkpoints (see the report).

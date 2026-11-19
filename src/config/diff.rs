@@ -129,6 +129,10 @@ pub enum ConfigChange {
         old: PathBuf,
         new: PathBuf,
     },
+    ModelBackend {
+        old: String,
+        new: String,
+    },
     ModelHashesPath {
         old: Option<PathBuf>,
         new: Option<PathBuf>,
@@ -189,6 +193,7 @@ impl ConfigChange {
             ConfigChange::ModelRevision { .. } => "model.revision".to_string(),
             ConfigChange::ModelCacheDir { .. } => "model.cache_dir".to_string(),
             ConfigChange::ModelHashesPath { .. } => "model.hashes_path".to_string(),
+            ConfigChange::ModelBackend { .. } => "model.backend".to_string(),
             ConfigChange::Other { path, .. } => path.clone(),
         }
     }
@@ -226,7 +231,8 @@ impl ConfigChange {
             }
             ConfigChange::ModelRevision { .. }
             | ConfigChange::ModelCacheDir { .. }
-            | ConfigChange::ModelHashesPath { .. } => ApplyStrategy::ReloadModel,
+            | ConfigChange::ModelHashesPath { .. }
+            | ConfigChange::ModelBackend { .. } => ApplyStrategy::ReloadModel,
             ConfigChange::MaxPlaybackQueueItems { .. } => ApplyStrategy::RestartSubsystem,
             ConfigChange::Other { path, .. } => match path.as_str() {
                 "security.cookie_secure" | "admin.session_expiry_secs" => {
@@ -349,6 +355,12 @@ pub fn diff(old: &AppConfig, new: &AppConfig) -> Vec<ConfigChange> {
         changes.push(ConfigChange::ModelCacheDir {
             old: old.model.cache_dir.clone(),
             new: new.model.cache_dir.clone(),
+        });
+    }
+    if old.model.backend != new.model.backend {
+        changes.push(ConfigChange::ModelBackend {
+            old: old.model.backend.clone(),
+            new: new.model.backend.clone(),
         });
     }
     if old.model.hashes_path != new.model.hashes_path {

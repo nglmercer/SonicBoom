@@ -2023,6 +2023,7 @@ impl TtsProvider for PocketTtsProvider {
             devices: vec!["cpu".to_string(), "auto".to_string()],
             requires_reference_audio: true,
             requires_reference_transcript: false,
+            voices: vec![],
             sample_rate: Some(POCKET_TTS_SAMPLE_RATE),
         }
     }

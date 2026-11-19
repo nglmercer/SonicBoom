@@ -1,0 +1,85 @@
+[package]
+name = "qwen3-tts"
+version = "0.3.0"
+edition = "2021"
+description = "Pure Rust inference for Qwen3-TTS"
+license = "MIT"
+autobenches = false
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["cpu"]
+cpu = []
+cli = ["clap", "indicatif"]
+hub = ["dep:hf-hub"]
+
+# All platform-portable features. Use `cargo lint` / `cargo check-all` / `cargo test-all`
+# instead of --all-features (which fails because platform-specific features conflict).
+all-portable = ["cpu", "cli", "hub"]
+
+# Platform-specific — enable manually based on your hardware:
+#   macOS:         metal, accelerate
+#   Linux + Intel: mkl
+#   Linux + NVIDIA: cuda, flash-attn
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+vulkan = ["candle-core/vulkan", "candle-nn/vulkan", "candle-transformers/vulkan"]
+profiling = ["dep:tracing-chrome"]
+
+[dependencies]
+# Candle ML framework
+candle-core = { path = "../candle/candle-core" }
+candle-nn = { path = "../candle/candle-nn" }
+candle-transformers = { path = "../candle/candle-transformers" }
+
+# Tokenization (HuggingFace tokenizers in Rust)
+tokenizers = "0.22"
+
+# Audio processing
+hound = "3.5"              # WAV I/O
+rubato = "1.0"            # High-quality resampling
+rustfft = "6.2"            # FFT for spectrograms
+
+# Serialization & model loading
+safetensors = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rayon = "1.10"             # Parallel CPU processing
+byteorder = "1.5"
+num-traits = "0.2"
+num-complex = "0.4"
+
+# CLI (optional)
+clap = { version = "4.5", features = ["derive"], optional = true }
+indicatif = { version = "0.18", optional = true }
+
+# HuggingFace Hub (optional) - uses ureq sync client, no OpenSSL needed
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"], optional = true }
+audioadapter-buffers = "2.0.0"
+
+# Profiling (optional)
+tracing-chrome = { version = "0.7", optional = true }
+half = "2.7.1"
+
+
+[[bin]]
+name = "generate_audio"
+path = "src/bin/generate_audio.rs"
+required-features = ["cli"]
+
+[package.metadata.sonicboom-vendor]
+upstream = "https://github.com/TrevorS/qwen3-tts-rs"
+revision = "711ceee07cad92673f86de8997bdf54c30caa49f"
+patch = "README.sonicboom.md"
+
+[workspace]

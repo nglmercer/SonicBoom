@@ -1,0 +1,30 @@
+[package]
+name = "kyutai-tts"
+version = "0.1.0"
+edition = "2021"
+description = "Kyutai DSM-TTS (tts-1.6b-en_fr) inference on candle, ported from the kyutai-labs/moshi Python reference"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+candle = { path = "../candle/candle-core", package = "candle-core" }
+candle-nn = { path = "../candle/candle-nn" }
+candle-transformers = { path = "../candle/candle-transformers" }
+# Streaming Mimi codec (Apache-2.0, vendored from kyutai-labs/moshi).
+moshi = { path = "../moshi-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-normalization = "0.1"
+hound = "3.5"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Reference encoder for the equivalence test only; never linked into SonicBoom
+# (its bundled static protobuf collides with ONNX Runtime's).
+sentencepiece = "0.11"
+
+[features]
+default = []
+vulkan = ["candle/vulkan", "candle-nn/vulkan", "candle-transformers/vulkan", "moshi/vulkan"]
+
+[workspace]

@@ -91,7 +91,7 @@ pub fn resolve_config_path() -> PathBuf {
 
 /// Preserve existing relative model directories; otherwise anchor portable paths
 /// to config/executable rather than the caller's working directory.
-#[cfg(feature = "qwen-gguf")]
+#[cfg(any(feature = "qwen-gguf", feature = "candle-qwen", feature = "candle-kyutai"))]
 pub fn resolve_model_dir(path: &std::path::Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();

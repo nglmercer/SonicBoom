@@ -129,6 +129,7 @@ impl TtsProvider for SupertonicProvider {
             devices: vec!["cpu".to_string(), "auto".to_string()],
             requires_reference_audio: false,
             requires_reference_transcript: false,
+            voices: vec![],
             sample_rate: None,
         }
     }
@@ -145,6 +146,16 @@ impl TtsProvider for SupertonicProvider {
                 )
             })
             .unwrap_or((false, None, None));
+        let backend = self
+            .state
+            .read()
+            .ok()
+            .and_then(|state| state.handle.as_ref().map(|h| h.backend_name()));
+        let device = if backend == Some("candle-vulkan") {
+            "vulkan"
+        } else {
+            EffectiveDevice::Cpu.as_str()
+        };
         ProviderStatus {
             provider_id: "supertonic".to_string(),
             enabled: true,
@@ -156,9 +167,9 @@ impl TtsProvider for SupertonicProvider {
                 ProviderStatusState::Loading
             },
             active_model,
-            effective_device: Some(EffectiveDevice::Cpu.as_str().to_string()),
+            effective_device: Some(device.to_string()),
             model_revision: None,
-            backend_diagnostics: None,
+            backend_diagnostics: backend.map(|b| serde_json::json!({ "engine": b })),
             detail,
         }
     }

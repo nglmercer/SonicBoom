@@ -16,3 +16,4 @@ __pycache__/
 
 /frontend/test-results/
 /frontend/playwright-report/
+/benchmarks/results

@@ -139,6 +139,7 @@ export const providersSchema: z.ZodType<ProvidersResponse> = z.object({
           clone_modes: z.array(z.string()),
           requires_reference_audio: z.boolean(),
           requires_reference_transcript: z.boolean(),
+          voices: z.array(z.string()).optional(),
           sample_rate: optionalNumber,
         })
         .nullable(),

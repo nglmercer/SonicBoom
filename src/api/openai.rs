@@ -42,8 +42,14 @@ pub const RETIRED_GPT_SOVITS_MODELS: &[&str] = &[
 pub fn is_cloning_model(model: &str) -> bool {
     matches!(
         model_provider(model),
-        Some(ModelProvider::QwenGguf | ModelProvider::PocketTts)
+        Some(ModelProvider::QwenGguf | ModelProvider::PocketTts | ModelProvider::QwenCandle)
     )
+}
+
+/// Models with built-in named voices that route through the provider registry
+/// without a voice profile (Kyutai TTS).
+pub fn is_named_voice_model(model: &str) -> bool {
+    matches!(model_provider(model), Some(ModelProvider::KyutaiCandle))
 }
 
 /// Recognized identifiers remain stable across feature combinations. Check
@@ -310,6 +316,38 @@ async fn post_speech_cloning(
         .into_response())
 }
 
+/// Named-voice providers (Kyutai TTS): the voice is a file stem in the provider's
+/// voices directory; the provider validates it. No voice profile is involved.
+async fn post_speech_named_voice(
+    state: &crate::AppState,
+    request: &SpeechRequest,
+    format: audio::AudioFormat,
+) -> Result<axum::response::Response, AppError> {
+    use super::providers::{build_registry_for_state, provider_error_to_app};
+    use super::tts::synthesize_provider_bounded;
+    let config = state.config.get().await;
+    let language = request.language.clone().unwrap_or_else(|| "en".to_string());
+    let speech = request.speech(&config, &language)?;
+    let mut provider_request =
+        super::speech_prep::provider_request(&request.model, &request.voice, speech, language);
+    provider_request.device = sonicboom::tts::providers::types::DevicePreference::Auto;
+    provider_request.seed = request.seed;
+    let registry = build_registry_for_state(state).await;
+    let provider = registry
+        .resolve_model(&request.model)
+        .map_err(provider_error_to_app)?;
+    let audio = synthesize_provider_bounded(state, provider, provider_request)
+        .await
+        .map_err(provider_error_to_app)?;
+    let audio_bytes = super::tts::encode_output(audio.samples, audio.sample_rate, format).await?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, format.content_type())],
+        Body::from(audio_bytes),
+    )
+        .into_response())
+}
+
 /// Synthesize speech using OpenAI-compatible API
 pub async fn post_speech(
     token: AuthenticatedToken,
@@ -344,6 +382,9 @@ async fn post_speech_inner(
             post_speech_cloning(&token, &state, &request, format),
         )
         .await;
+    }
+    if is_named_voice_model(&request.model) {
+        return post_speech_named_voice(&state, &request, format).await;
     }
     let voice_name = map_voice(&request.voice)?;
 
@@ -427,6 +468,8 @@ pub async fn get_models() -> impl IntoResponse {
             let owned_by = match model_provider(id) {
                 Some(ModelProvider::QwenGguf) => "local:qwen3-gguf",
                 Some(ModelProvider::PocketTts) => "local:pocket-tts",
+                Some(ModelProvider::QwenCandle) => "local:qwen3-candle",
+                Some(ModelProvider::KyutaiCandle) => "local:kyutai-candle",
                 _ => "local",
             };
             serde_json::json!({

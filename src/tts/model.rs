@@ -5,6 +5,7 @@ use ort::session::Session;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::tts::backend::{BackendChoice, SupertonicBackend, load_backend};
 use crate::tts::{download::ModelPaths, text::TextProcessor};
 
 // ============================================================================
@@ -81,28 +82,25 @@ pub struct VoiceStyle {
 // ============================================================================
 
 pub struct ModelHandle {
-    pub sessions: std::sync::Mutex<Sessions>,
+    /// Inference backend; one lock covers a whole chunk (the pipeline is sequential).
+    pub backend: std::sync::Mutex<Box<dyn SupertonicBackend>>,
     pub text_processor: TextProcessor,
     pub voice_styles: HashMap<String, VoiceStyle>,
     pub config: TtsConfig,
 }
 
-/// Holds all ONNX sessions together so they can be locked as a unit.
-/// This prevents deadlocks and avoids contention between sessions during sequential inference.
-pub struct Sessions {
-    pub duration_predictor: Session,
-    pub text_encoder: Session,
-    pub vector_estimator: Session,
-    pub vocoder: Session,
-}
-
 impl ModelHandle {
+    /// Engine executing the Supertonic graphs (`ort`, `candle-cpu`, `candle-vulkan`).
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.lock().map(|b| b.name()).unwrap_or("unknown")
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.config.ae.sample_rate
     }
 }
 
-fn build_session(path: &std::path::Path) -> Result<Session> {
+pub(crate) fn build_session(path: &std::path::Path) -> Result<Session> {
     crate::onnx_runtime::initialize()?;
     let builder = Session::builder()?;
     #[cfg(target_os = "android")]
@@ -157,14 +155,13 @@ fn build_session(path: &std::path::Path) -> Result<Session> {
 
 impl ModelHandle {
     pub fn load(paths: &ModelPaths) -> Result<Self> {
-        tracing::info!("Loading ONNX sessions...");
+        Self::load_with(paths, BackendChoice::Ort)
+    }
 
-        let sessions = std::sync::Mutex::new(Sessions {
-            duration_predictor: build_session(&paths.duration_predictor)?,
-            text_encoder: build_session(&paths.text_encoder)?,
-            vector_estimator: build_session(&paths.vector_estimator)?,
-            vocoder: build_session(&paths.vocoder)?,
-        });
+    pub fn load_with(paths: &ModelPaths, choice: BackendChoice) -> Result<Self> {
+        tracing::info!("Loading Supertonic graphs (backend {})...", choice.as_str());
+
+        let backend = std::sync::Mutex::new(load_backend(paths, choice)?);
 
         let text_processor = TextProcessor::load(&paths.unicode_indexer)?;
 
@@ -206,7 +203,7 @@ impl ModelHandle {
         );
 
         Ok(Self {
-            sessions,
+            backend,
             text_processor,
             voice_styles,
             config,

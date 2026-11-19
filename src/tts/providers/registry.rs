@@ -144,6 +144,7 @@ mod tests {
                 devices: vec!["cpu".to_string(), "auto".to_string()],
                 requires_reference_audio: false,
                 requires_reference_transcript: false,
+                voices: vec![],
                 sample_rate: Some(24000),
             }
         }

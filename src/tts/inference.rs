@@ -1,6 +1,4 @@
 use anyhow::{Result, anyhow};
-use ndarray::{Array, Array2, Array3};
-use ort::value::Tensor;
 use rand::Rng;
 
 use crate::tts::model::{ModelHandle, VoiceStyle};
@@ -11,7 +9,7 @@ use crate::tts::model::{ModelHandle, VoiceStyle};
 /// churn and eliminates any risk of deadlocks between the per-session mutexes.
 macro_rules! lock_sessions {
     ($model:expr) => {
-        $model.sessions.lock()
+        $model.backend.lock()
     };
 }
 
@@ -253,37 +251,15 @@ fn synthesize_chunk(
     sample_rate: f32,
 ) -> Result<Vec<f32>> {
     let (ids, _) = model.text_processor.encode(tagged_text);
-    let seq_len = ids.len();
-    if seq_len == 0 {
+    if ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    // text_ids: [1, seq_len]
-    let text_ids = Array2::<i64>::from_shape_vec((1, seq_len), ids)?;
-    // text_mask: [1, 1, seq_len]
-    let text_mask = Array3::<f32>::ones((1, 1, seq_len));
-
-    // style_dp: [1, dp_dim1, dp_dim2]
-    let (_, dp1, dp2) = style.style_dp_dims;
-    let style_dp = Array3::<f32>::from_shape_vec((1, dp1, dp2), style.style_dp.clone())?;
-
-    // style_ttl: [1, ttl_dim1, ttl_dim2]
-    let (_, ttl1, ttl2) = style.style_ttl_dims;
-    let style_ttl = Array3::<f32>::from_shape_vec((1, ttl1, ttl2), style.style_ttl.clone())?;
-
-    // Lock sessions for entire chunk — inference is strictly sequential
-    let mut sessions = lock_sessions!(model).map_err(|e| anyhow!("Session lock poisoned: {e}"))?;
+    // Lock the backend for the entire chunk — inference is strictly sequential.
+    let mut backend = lock_sessions!(model).map_err(|e| anyhow!("Backend lock poisoned: {e}"))?;
 
     // 1. Duration predictor → duration (seconds)
-    let duration_sec: f32 = {
-        let outputs = sessions.duration_predictor.run(ort::inputs![
-            "text_ids"  => Tensor::from_array(text_ids.clone())?,
-            "style_dp"  => Tensor::from_array(style_dp.clone())?,
-            "text_mask" => Tensor::from_array(text_mask.clone())?,
-        ])?;
-        let (_, data) = outputs["duration"].try_extract_tensor::<f32>()?;
-        data.iter().sum()
-    };
+    let duration_sec = backend.duration(&ids, &style.style_dp, style.style_dp_dims)?;
 
     // Validate the predictor output *before* allocating any tensor:
     // non-finite, non-positive, huge, or overflowing durations fail here.
@@ -293,45 +269,18 @@ fn synthesize_chunk(
         latent_len,
     } = chunk_lengths_from_duration(duration_sec, sample_rate_u32, chunk_size, latent_dim_eff)?;
 
-    // latent_mask: [1, 1, latent_len]
-    let latent_mask = Array3::<f32>::ones((1, 1, latent_len));
+    // 2. Text encoder (the backend keeps the per-chunk constants)
+    backend.encode_text(&ids, &style.style_ttl, style.style_ttl_dims, latent_len)?;
 
-    // 2. Text encoder
-    let (text_emb_dims, text_emb_vec): (Vec<usize>, Vec<f32>) = {
-        let outputs = sessions.text_encoder.run(ort::inputs![
-            "text_ids"  => Tensor::from_array(text_ids.clone())?,
-            "style_ttl" => Tensor::from_array(style_ttl.clone())?,
-            "text_mask" => Tensor::from_array(text_mask.clone())?,
-        ])?;
-        let (shape, data) = outputs["text_emb"].try_extract_tensor::<f32>()?;
-        let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        (dims, data.to_vec())
-    };
-
-    let text_emb = Array3::<f32>::from_shape_vec(
-        (text_emb_dims[0], text_emb_dims[1], text_emb_dims[2]),
-        text_emb_vec,
-    )?;
-
-    // 3. Initialize noise (with mask applied)
+    // 3. Initialize noise
     let mut rng = rand::rng();
-    let noise: Vec<f32> = (0..latent_dim_eff * latent_len)
+    let mut xt: Vec<f32> = (0..latent_dim_eff * latent_len)
         .map(|_| {
             let u1: f32 = rng.random_range(f32::EPSILON..1.0);
             let u2: f32 = rng.random_range(0.0f32..1.0);
             (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
         })
         .collect();
-    let mut xt = Array3::<f32>::from_shape_vec((1, latent_dim_eff, latent_len), noise)?;
-
-    let total_steps = inference_steps as f32;
-    let total_step_tensor = Tensor::from_array(Array::from_elem(1, total_steps))?;
-
-    // Pre-convert constant tensors once before the loop
-    let text_emb_tensor = Tensor::from_array(text_emb)?;
-    let style_ttl_tensor = Tensor::from_array(style_ttl)?;
-    let latent_mask_tensor = Tensor::from_array(latent_mask)?;
-    let text_mask_tensor = Tensor::from_array(text_mask)?;
 
     // 4. Flow matching loop
     // Reference: assign denoised_latent directly to xt (not Euler step)
@@ -342,41 +291,17 @@ fn synthesize_chunk(
                 "inference cancelled or deadline exceeded"
             );
         }
-        let current_step_tensor = Tensor::from_array(Array::from_elem(1, step as f32))?;
-
-        let (vel_dims, vel_vec): (Vec<usize>, Vec<f32>) = {
-            let outputs = sessions.vector_estimator.run(ort::inputs![
-                "noisy_latent" => Tensor::from_array(xt.clone())?,
-                "text_emb"     => text_emb_tensor.clone(),
-                "style_ttl"    => style_ttl_tensor.clone(),
-                "latent_mask"  => latent_mask_tensor.clone(),
-                "text_mask"    => text_mask_tensor.clone(),
-                "current_step" => current_step_tensor,
-                "total_step"   => total_step_tensor.clone(),
-            ])?;
-            let (shape, data) = outputs["denoised_latent"].try_extract_tensor::<f32>()?;
-            let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-            (dims, data.to_vec())
-        };
-
-        // Reference: xt = denoised (direct assignment)
-        xt = Array3::<f32>::from_shape_vec((vel_dims[0], vel_dims[1], vel_dims[2]), vel_vec)?;
+        xt = backend.denoise_step(&xt, latent_dim_eff, latent_len, step, inference_steps)?;
     }
 
     // 5. Vocoder
-    let wav_vec: Vec<f32> = {
-        if let Some(control) = crate::tts::control::current() {
-            anyhow::ensure!(
-                control.update("decoding", 0),
-                "inference cancelled or deadline exceeded"
-            );
-        }
-        let outputs = sessions.vocoder.run(ort::inputs![
-            "latent" => Tensor::from_array(xt)?,
-        ])?;
-        let (_, data) = outputs["wav_tts"].try_extract_tensor::<f32>()?;
-        data.to_vec()
-    };
+    if let Some(control) = crate::tts::control::current() {
+        anyhow::ensure!(
+            control.update("decoding", 0),
+            "inference cancelled or deadline exceeded"
+        );
+    }
+    let wav_vec = backend.vocode(&xt, latent_dim_eff, latent_len)?;
 
     // 6. Trim by duration (reference: wav[..wav_len])
     let trimmed_len = wav_len.min(wav_vec.len());

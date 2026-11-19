@@ -138,6 +138,9 @@ fn validate_model(config: &AppConfig) -> Result<(), String> {
             "model.inference_steps must be between 1 and {MAX_INFERENCE_STEPS}"
         ));
     }
+    if let Err(message) = crate::tts::backend::BackendChoice::resolve(&model.backend) {
+        return Err(message);
+    }
     if !crate::tts::download::is_valid_commit_sha(&model.revision) {
         return Err(
             "model.revision must be a 40-character commit SHA (mutable names like 'main' are rejected)"
@@ -350,6 +353,24 @@ fn validate_security(config: &AppConfig) -> Result<(), String> {
 fn validate_providers(config: &AppConfig) -> Result<(), String> {
     if !(1..=4096).contains(&config.voices.max_profiles) {
         return Err("voices.max_profiles must be 1..=4096".into());
+    }
+    for (name, candle) in [
+        ("qwen3_candle", &config.providers.qwen3_candle),
+        ("kyutai_candle", &config.providers.kyutai_candle),
+    ] {
+        if !["auto", "cpu", "vulkan"].contains(&candle.device.as_str()) {
+            return Err(format!(
+                "providers.{name}.device must be one of: auto, cpu, vulkan"
+            ));
+        }
+        if candle.default_voice.is_empty()
+            || candle.default_voice.contains(['/', '\\'])
+            || candle.default_voice.contains("..")
+        {
+            return Err(format!(
+                "providers.{name}.default_voice must be a plain voice name"
+            ));
+        }
     }
     let gguf = &config.providers.qwen3_gguf;
     if !["cpu", "auto", "vulkan", "cuda"].contains(&gguf.device.as_str()) {

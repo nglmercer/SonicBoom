@@ -208,7 +208,16 @@ fn validate_model_language(model: &str, language: &str) -> Result<(), AppError> 
             )
             .map_err(|_| unsupported())
         }
-        Some(ModelProvider::QwenGguf) => qwen_language(language).ok_or_else(unsupported),
+        Some(ModelProvider::QwenGguf | ModelProvider::QwenCandle) => {
+            qwen_language(language).ok_or_else(unsupported)
+        }
+        Some(ModelProvider::KyutaiCandle) => {
+            if ["en", "fr"].contains(&language) {
+                Ok(())
+            } else {
+                Err(unsupported())
+            }
+        }
     }
 }
 

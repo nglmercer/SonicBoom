@@ -29,6 +29,7 @@ export function useModelCatalog(input: ModelCatalogInput) {
       cloned: false,
       languages: capabilities.value.find((cap) => cap.provider_id === 'supertonic')?.languages || ['en'],
       ready: info.value ? info.value.model.status === 'ready' : modelReady,
+      namedVoices: [] as string[],
     },
     ...capabilities.value
       .filter((cap) => cap.requires_reference_audio)
@@ -39,6 +40,20 @@ export function useModelCatalog(input: ModelCatalogInput) {
           cloned: true,
           languages: modelLanguages(cap, id),
           ready: isModelReady(providers.value, cap.provider_id, id),
+          namedVoices: [] as string[],
+        })),
+      ),
+    // Providers with built-in named voices and no voice profile (Kyutai TTS).
+    ...capabilities.value
+      .filter((cap) => !cap.requires_reference_audio && cap.provider_id !== 'supertonic' && cap.voices?.length)
+      .flatMap((cap) =>
+        cap.models.map((id) => ({
+          id,
+          provider: cap.provider_id,
+          cloned: false,
+          languages: modelLanguages(cap, id),
+          ready: isModelReady(providers.value, cap.provider_id, id),
+          namedVoices: cap.voices ?? [],
         })),
       ),
   ]);
@@ -67,7 +82,9 @@ export function useModelCatalog(input: ModelCatalogInput) {
             detail: `${item.provider} · ${item.language}`,
             cloned: true,
           }))
-      : builtinVoices.value.map((item) => ({ ...item, detail: 'Built-in voice', cloned: false })),
+      : selectedModel.value.namedVoices.length
+        ? selectedModel.value.namedVoices.map((name) => ({ id: name, name, detail: 'Built-in voice', cloned: false }))
+        : builtinVoices.value.map((item) => ({ ...item, detail: 'Built-in voice', cloned: false })),
   );
 
   watch(availableVoices, (value) => {

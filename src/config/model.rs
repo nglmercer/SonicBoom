@@ -182,6 +182,10 @@ pub struct ModelConfig {
     /// Number of inference steps per synthesis.
     #[serde(default = "default_inference_steps")]
     pub inference_steps: usize,
+    /// Supertonic inference engine: `auto` (candle when compiled in, otherwise
+    /// ONNX Runtime), `ort`, `candle-cpu` or `candle-vulkan`.
+    #[serde(default = "default_model_backend")]
+    pub backend: String,
     /// TCP connect timeout for model downloads (seconds).
     #[serde(default = "default_model_download_connect_timeout_secs")]
     pub download_connect_timeout_secs: u64,
@@ -538,19 +542,97 @@ pub struct PocketTtsConfig {
     pub cpu_threads: usize,
 }
 
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            qwen3_gguf: Qwen3GgufConfig::default(),
+            pocket_tts: PocketTtsConfig::default(),
+            qwen3_candle: CandleProviderConfig::default(),
+            kyutai_candle: default_kyutai_candle(),
+            qwen3: DeprecatedQwen3Section::default(),
+            gpt_sovits: DeprecatedGptSovitsSection::default(),
+        }
+    }
+}
+
+/// Settings shared by the candle voice providers (`[providers.qwen3_candle]`,
+/// `[providers.kyutai_candle]`). Weights are read from `model_dir`; with
+/// `download = true` the pinned bundle is fetched and SHA-256 verified there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandleProviderConfig {
+    /// Enable the provider (default `false`).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Directory holding the model files (`config.json`, safetensors, tokenizer).
+    #[serde(default = "default_qwen_candle_model_dir")]
+    pub model_dir: PathBuf,
+    /// Kyutai only: directory of `kyutai/tts-voices` embeddings (`<voice>.safetensors`).
+    #[serde(default = "default_kyutai_voices_dir")]
+    pub voices_dir: PathBuf,
+    /// Kyutai only: voice used when a request does not name one.
+    #[serde(default = "default_kyutai_voice")]
+    pub default_voice: String,
+    /// `auto` (Vulkan when compiled in, else CPU), `cpu` or `vulkan`.
+    #[serde(default = "default_provider_device")]
+    pub device: String,
+    /// Download and verify the pinned bundle (and Kyutai's default voice) into the
+    /// directories above when enabled. Set `false` to use files you manage yourself.
+    #[serde(default = "default_candle_download")]
+    pub download: bool,
+}
+
+impl Default for CandleProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model_dir: default_qwen_candle_model_dir(),
+            voices_dir: default_kyutai_voices_dir(),
+            default_voice: default_kyutai_voice(),
+            device: default_provider_device(),
+            download: default_candle_download(),
+        }
+    }
+}
+
+fn default_qwen_candle_model_dir() -> PathBuf {
+    PathBuf::from("models/qwen3-tts-candle")
+}
+fn default_kyutai_voices_dir() -> PathBuf {
+    PathBuf::from("models/kyutai-tts/voices")
+}
+fn default_kyutai_voice() -> String {
+    "calm".to_string()
+}
+fn default_candle_download() -> bool {
+    true
+}
+fn default_kyutai_candle() -> CandleProviderConfig {
+    CandleProviderConfig {
+        model_dir: PathBuf::from("models/kyutai-tts"),
+        ..CandleProviderConfig::default()
+    }
+}
+
 /// Provider section grouping (`[providers.qwen3_gguf]`,
 /// `[providers.pocket_tts]`). Leftover `[providers.qwen3]` Candle and
 /// `[providers.gpt_sovits]` sections are tolerated for boot compatibility
 /// but ignored (see [`DeprecatedQwen3Section`] and
 /// [`DeprecatedGptSovitsSection`]): delete them from old configuration
 /// files.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProvidersConfig {
     #[serde(default)]
     pub qwen3_gguf: Qwen3GgufConfig,
     #[serde(default)]
     pub pocket_tts: PocketTtsConfig,
+    /// Qwen3-TTS (0.6B/1.7B Base safetensors) on candle (`[providers.qwen3_candle]`).
+    #[serde(default)]
+    pub qwen3_candle: CandleProviderConfig,
+    /// Kyutai TTS 1.6B en/fr on candle (`[providers.kyutai_candle]`).
+    #[serde(default = "default_kyutai_candle")]
+    pub kyutai_candle: CandleProviderConfig,
     #[serde(default, skip_serializing)]
     pub qwen3: DeprecatedQwen3Section,
     #[serde(default, skip_serializing)]
@@ -679,6 +761,10 @@ fn default_model_cache_dir() -> PathBuf {
 fn default_model_revision() -> String {
     DEFAULT_MODEL_REVISION.to_string()
 }
+fn default_model_backend() -> String {
+    "auto".to_string()
+}
+
 fn default_inference_steps() -> usize {
     5
 }
@@ -865,6 +951,7 @@ impl Default for AppConfig {
                 revision: default_model_revision(),
                 hashes_path: None,
                 inference_steps: default_inference_steps(),
+                backend: default_model_backend(),
                 download_connect_timeout_secs: default_model_download_connect_timeout_secs(),
                 download_timeout_secs: default_model_download_timeout_secs(),
             },
@@ -957,6 +1044,7 @@ impl Default for ModelConfig {
             revision: default_model_revision(),
             hashes_path: None,
             inference_steps: default_inference_steps(),
+            backend: default_model_backend(),
             download_connect_timeout_secs: default_model_download_connect_timeout_secs(),
             download_timeout_secs: default_model_download_timeout_secs(),
         }

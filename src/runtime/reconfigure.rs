@@ -178,7 +178,8 @@ impl RuntimeReconfigurator {
                 }
                 ConfigChange::ModelRevision { .. }
                 | ConfigChange::ModelCacheDir { .. }
-                | ConfigChange::ModelHashesPath { .. } => self.apply_model_reload(new).await,
+                | ConfigChange::ModelHashesPath { .. }
+                | ConfigChange::ModelBackend { .. } => self.apply_model_reload(new).await,
                 ConfigChange::LogToFile { .. } | ConfigChange::LogToStdout { .. } => {
                     self.config.set_pending_restart(true).await;
                     ApplyStatus::PendingRestart

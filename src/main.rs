@@ -955,6 +955,7 @@ async fn run_server_inner(config_path: std::path::PathBuf, smoke: bool) -> anyho
         provider_pool.sync_gguf_config(crate::api::providers::map_qwen_gguf_config(
             &current.providers.qwen3_gguf,
         ));
+        crate::api::providers::sync_candle_providers(&provider_pool, &current.providers);
     }
 
     // Runtime reconfiguration: every committed configuration

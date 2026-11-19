@@ -72,7 +72,7 @@ COPY models.sha256.json ./models.sha256.json
 
 # Cloning backends ride along so every engine works out of the box.
 # Providers stay disabled by default: only Supertonic weights download.
-RUN cargo build --release --locked --no-default-features --features server,qwen-gguf,pocket-tts,web-ui
+RUN cargo build --release --locked --no-default-features --features server,qwen-gguf,candle-qwen,candle-kyutai,pocket-tts,web-ui
 
 # Stage the ONNX Runtime shared library (if dynamically linked) at a known
 # path for the runtime image. Fail the build if it is needed but missing.
@@ -98,7 +98,7 @@ RUN set -eu; \
 FROM builder AS builder-playback
 RUN apt-get update && apt-get install -y --no-install-recommends libasound2-dev \
     && rm -rf /var/lib/apt/lists/*
-RUN cargo build --release --locked --no-default-features --features server,playback,qwen-gguf,pocket-tts,web-ui
+RUN cargo build --release --locked --no-default-features --features server,playback,qwen-gguf,candle-qwen,candle-kyutai,pocket-tts,web-ui
 
 # ============================================================================
 # Builder: CUDA-enabled headless server
@@ -156,7 +156,7 @@ COPY models.sha256.json ./models.sha256.json
 ENV CARGO_BUILD_JOBS=2
 ARG SONICBOOM_CUDA_ARCHITECTURES=""
 ENV SONICBOOM_CUDA_ARCHITECTURES=${SONICBOOM_CUDA_ARCHITECTURES}
-RUN cargo build --release --locked --no-default-features --features server,cuda,qwen-gguf-cuda,pocket-tts,web-ui
+RUN cargo build --release --locked --no-default-features --features server,cuda,qwen-gguf-cuda,candle-qwen,candle-kyutai,pocket-tts,web-ui
 
 RUN set -eu; \
     mkdir -p /build/ort-dist; \

@@ -41,6 +41,8 @@ export interface Capabilities {
   clone_modes: string[];
   requires_reference_audio: boolean;
   requires_reference_transcript: boolean;
+  /** Built-in named voices selectable without a voice profile (Kyutai TTS). */
+  voices?: string[];
   sample_rate?: number;
 }
 export interface ProvidersResponse {

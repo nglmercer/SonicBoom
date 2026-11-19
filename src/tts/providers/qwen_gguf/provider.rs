@@ -348,6 +348,7 @@ impl super::super::TtsProvider for QwenGgufProvider {
             devices,
             requires_reference_audio: true,
             requires_reference_transcript: true,
+            voices: vec![],
             sample_rate: Some(QWEN_GGUF_SAMPLE_RATE),
         }
     }

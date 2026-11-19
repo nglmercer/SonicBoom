@@ -23,7 +23,17 @@ path = "src/lib.rs"
 # a hard build requirement for default builds; build CPU-only with
 # `--no-default-features --features qwen-gguf` instead. CUDA stays an
 # explicit opt-in (`qwen-gguf-cuda`).
-default = ["web-ui", "server", "playback", "qwen-gguf", "qwen-gguf-vulkan", "pocket-tts", "gui"]
+#
+# Candle migration: the candle engine ships in default builds too. `model.backend =
+# "auto"` then runs the Supertonic graphs on candle (ONNX Runtime stays selectable with
+# `model.backend = "ort"`), and the `qwen3-candle` / `kyutai-candle` providers are available
+# (disabled until enabled in `[providers.*]`). `candle-vulkan` adds the Vulkan device and
+# needs `slangc` (Slang shader compiler) at build time on top of the Vulkan SDK; build without
+# it via `--no-default-features --features server,qwen-gguf,candle-qwen,candle-kyutai`.
+default = [
+    "web-ui", "server", "playback", "qwen-gguf", "qwen-gguf-vulkan", "pocket-tts", "gui",
+    "candle-vulkan", "candle-qwen", "candle-kyutai",
+]
 web-ui = ["server"]
 # Android uses a separately installed, verified Bionic runtime (no binary download).
 android-ort = ["ort/load-dynamic"]
@@ -69,6 +79,17 @@ pocket-tts = []
 qwen-gguf = ["dep:tokenizers", "dep:rustfft", "dep:half", "dep:sonicboom-qwen-llama"]
 qwen-gguf-vulkan = ["qwen-gguf", "sonicboom-qwen-llama/vulkan"]
 qwen-gguf-cuda = ["qwen-gguf", "sonicboom-qwen-llama/cuda"]
+# Candle inference backends (branch `candle` experiment, see docs/candle-migration.md).
+# The candle fork is vendored under vendor/candle (see vendor/candle/UPSTREAM.md).
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-onnx"]
+candle-vulkan = [
+    "candle", "candle-core/vulkan", "candle-nn/vulkan",
+    "qwen3-tts?/vulkan", "kyutai-tts?/vulkan",
+]
+# Candle voice providers. `candle-kyutai` builds the SentencePiece C++ sources; on
+# GCC 14+ set CXXFLAGS="-include cstdint" (the vendored sources miss <cstdint>).
+candle-qwen = ["candle", "dep:qwen3-tts"]
+candle-kyutai = ["candle", "dep:kyutai-tts"]
 
 [dependencies]
 # Async runtime (only the features actually used)
@@ -105,6 +126,11 @@ tower-sessions = { version = "0.14", features = ["memory-store"], optional = tru
 ndarray = "0.17"
 
 sonicboom-qwen-llama = { path = "native/qwen-llama", optional = true }
+candle-core = { path = "vendor/candle/candle-core", optional = true }
+candle-nn = { path = "vendor/candle/candle-nn", optional = true }
+candle-onnx = { path = "vendor/candle/candle-onnx", optional = true }
+qwen3-tts = { path = "vendor/qwen3-tts", optional = true }
+kyutai-tts = { path = "vendor/kyutai-tts", optional = true }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
 rustfft = { version = "6.2", optional = true }
 half = { version = "2", optional = true }
@@ -188,6 +214,9 @@ rev = "bd38b41fe8415993b5eeee7e780e42766d7cc7f0"
 package = "tiktools-plugin-sdk"
 optional = true
 
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [[bin]]
 name = "SonicBoom"
 path = "src/main.rs"
@@ -239,3 +268,7 @@ required-features = ["pocket-tts"]
 [[example]]
 name = "qwen_backend_probe"
 required-features = ["qwen-gguf"]
+
+[[example]]
+name = "supertonic_backend_bench"
+required-features = []

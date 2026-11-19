@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::config::model::ModelConfig;
-use crate::tts::{ModelStatus, download, model::ModelHandle};
+use crate::tts::{ModelStatus, backend::BackendChoice, download, model::ModelHandle};
 
 /// Failure to prepare a model candidate.
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +113,7 @@ impl ModelService {
             model.download_timeout_secs,
         );
         let cache_dir = model.cache_dir.clone();
+        let backend = BackendChoice::resolve(&model.backend).map_err(ModelServiceError::Load)?;
         let status = Arc::clone(&self.status);
 
         // Download the candidate, reporting progress
@@ -152,7 +153,7 @@ impl ModelService {
         if !keep_ready {
             *status.write().await = ModelStatus::Loading;
         }
-        let handle = match tokio::task::spawn_blocking(move || ModelHandle::load(&paths)).await {
+        let handle = match tokio::task::spawn_blocking(move || ModelHandle::load_with(&paths, backend)).await {
             Ok(Ok(handle)) => handle,
             Ok(Err(e)) => {
                 tracing::error!("Model reload load failed: {e}");
@@ -196,6 +197,7 @@ mod tests {
             revision: DEFAULT_MODEL_REVISION.to_string(),
             hashes_path: None,
             inference_steps: 5,
+            backend: "auto".to_string(),
             download_connect_timeout_secs: DEFAULT_MODEL_DOWNLOAD_CONNECT_TIMEOUT_SECS,
             download_timeout_secs: DEFAULT_MODEL_DOWNLOAD_TIMEOUT_SECS,
         }

@@ -259,6 +259,40 @@ pub(super) async fn post_tts_prepared(
     .await
 }
 
+/// Named-voice providers (Kyutai TTS) for the studio/job path: the voice is a file stem in the
+/// provider's voices directory and the provider validates it. `speech` is already prepared.
+#[cfg(feature = "playback")]
+pub(super) async fn post_named_voice_prepared(
+    state: &crate::AppState,
+    model: &str,
+    voice: &str,
+    language: String,
+    format: Option<&str>,
+    speech: SpeechText,
+) -> Result<Response, AppError> {
+    // Omitted means Opus; an explicit unknown value is a client error.
+    let format = match format {
+        None => audio::AudioFormat::Opus,
+        Some(raw) => audio::AudioFormat::parse(raw).map_err(|e| AppError::BadRequest(e.to_string()))?,
+    };
+    let registry = super::providers::build_registry_for_state(state).await;
+    let provider = registry
+        .resolve_model(model)
+        .map_err(super::providers::provider_error_to_app)?;
+    let mut request = super::speech_prep::provider_request(model, voice, speech, language);
+    request.device = sonicboom::tts::providers::types::DevicePreference::Auto;
+    let pcm = synthesize_provider_bounded(state, provider, request)
+        .await
+        .map_err(super::providers::provider_error_to_app)?;
+    let bytes = encode_output(pcm.samples, pcm.sample_rate, format).await?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, format.content_type())],
+        Body::from(bytes),
+    )
+        .into_response())
+}
+
 async fn post_tts_inner(
     token: AuthenticatedToken,
     State(state): State<crate::AppState>,
@@ -414,6 +448,27 @@ async fn post_tts_and_play_inner(
             synthesize_bounded(&state, model_handle, speech, lang, voice_name).await?,
             rate,
         )
+    } else if provider_id == "kyutai-candle" {
+        // Named voices (file stems in the provider's voices directory): no profile.
+        let speech = query
+            .speech_options()
+            .prepare(&config, &lang, body.trim())?;
+        let registry = super::providers::build_registry_for_state(&state).await;
+        let provider = registry.get(provider_id).ok_or_else(|| {
+            AppError::ServiceUnavailable("selected provider is not installed in this build".into())
+        })?;
+        let mut request = super::speech_prep::provider_request(
+            sonicboom::tts::providers::catalog::KYUTAI_CANDLE_MODELS[0],
+            voice,
+            speech,
+            lang,
+        );
+        request.device = sonicboom::tts::providers::types::DevicePreference::Auto;
+        playback_manager(&state)?;
+        let audio = synthesize_provider_bounded(&state, provider, request)
+            .await
+            .map_err(super::providers::provider_error_to_app)?;
+        (audio.samples, audio.sample_rate)
     } else {
         let (provider, request) = prepare_plugin_clone(
             &state,
@@ -609,7 +664,10 @@ fn plugin_identity<'a>(
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .unwrap_or("supertonic");
-    if !matches!(provider, "supertonic" | "pocket-tts" | "qwen3-gguf") {
+    if !matches!(
+        provider,
+        "supertonic" | "pocket-tts" | "qwen3-gguf" | "qwen3-candle" | "kyutai-candle"
+    ) {
         return Err(AppError::BadRequest("unknown provider".into()));
     }
     let voice = voice
@@ -639,6 +697,15 @@ mod plugin_identity_tests {
             ("pocket-tts", "id")
         );
         assert!(plugin_identity(Some("pocket-tts"), Some("qwen3-gguf:id")).is_err());
+        assert_eq!(
+            plugin_identity(Some("kyutai-candle"), Some("kyutai-candle:calm")).unwrap(),
+            ("kyutai-candle", "calm")
+        );
+        assert_eq!(
+            plugin_identity(Some("qwen3-candle"), Some("id")).unwrap(),
+            ("qwen3-candle", "id")
+        );
+        assert!(plugin_identity(Some("kyutai-candle"), Some("qwen3-candle:x")).is_err());
         assert!(plugin_identity(Some("unknown"), None).is_err());
     }
 }
@@ -781,6 +848,7 @@ mod plugin_play_tests {
                 devices: vec!["cpu".into()],
                 requires_reference_audio: true,
                 requires_reference_transcript: self.0 == "qwen3-gguf",
+                voices: vec![],
                 sample_rate: Some(24_000),
             }
         }

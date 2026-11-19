@@ -89,8 +89,11 @@ export function createApi(http: HttpClient) {
       sampling?: SamplingQuery,
       signal?: AbortSignal,
       pronunciation?: SpeechPronunciation,
+      provider?: string,
     ) => {
       const params = new URLSearchParams({ lang: language, format: 'wav', [cloned ? 'profile' : 'voice']: voice });
+      // Named-voice engines other than Supertonic (Kyutai TTS) are routed by provider.
+      if (provider) params.set('provider', provider);
       if (sampling)
         for (const [key, value] of Object.entries(sampling)) {
           if (value !== undefined && value !== null && value !== '') params.set(key, String(value));

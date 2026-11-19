@@ -15,6 +15,8 @@ export type GenerationInput = Readonly<{
   voice: string;
   language: string;
   cloned: boolean;
+  /** Set for named-voice engines other than Supertonic (Kyutai TTS). */
+  provider?: string;
   normalization?: NormalizationMode;
   locale?: string;
   reading_style?: ReadingStyle;
@@ -194,6 +196,7 @@ export function useSynthesis(studio: Studio) {
         samplingFor(input.model),
         signal,
         { normalization: input.normalization, locale: input.locale, reading_style: input.reading_style },
+        input.provider,
       );
       if (disposed || requestEpoch !== epoch) return;
       const generation = Object.freeze({ jobId: job.id, input, requestEpoch, preset });
@@ -213,6 +216,7 @@ export function useSynthesis(studio: Studio) {
       voice: studio.voice.value,
       language: studio.language.value,
       cloned: studio.selectedModel.value.cloned,
+      provider: studio.selectedModel.value.namedVoices?.length ? studio.selectedModel.value.provider : undefined,
       normalization: studio.pronunciation?.value?.normalization,
       locale: studio.pronunciation?.value?.locale,
       reading_style: studio.pronunciation?.value?.reading_style,

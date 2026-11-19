@@ -322,6 +322,10 @@ pub struct ProviderCapabilities {
     pub devices: Vec<String>,
     pub requires_reference_audio: bool,
     pub requires_reference_transcript: bool,
+    /// Built-in named voices selectable without a voice profile (Kyutai TTS).
+    /// Empty for providers whose voices are voice profiles or fixed style sets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voices: Vec<String>,
     pub sample_rate: Option<u32>,
 }
 

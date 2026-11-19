@@ -130,6 +130,7 @@ pub const ALL_CONFIG_PATHS: &[&str] = &[
     "model.revision",
     "model.hashes_path",
     "model.inference_steps",
+    "model.backend",
     "model.download_connect_timeout_secs",
     "model.download_timeout_secs",
     "tts.max_text_length",
@@ -171,6 +172,16 @@ pub const ALL_CONFIG_PATHS: &[&str] = &[
     "providers.qwen3_gguf.max_concurrent",
     "providers.qwen3_gguf.cache_entries",
     "providers.qwen3_gguf.max_tokens",
+    "providers.qwen3_candle.enabled",
+    "providers.qwen3_candle.model_dir",
+    "providers.qwen3_candle.device",
+    "providers.qwen3_candle.download",
+    "providers.kyutai_candle.enabled",
+    "providers.kyutai_candle.model_dir",
+    "providers.kyutai_candle.voices_dir",
+    "providers.kyutai_candle.default_voice",
+    "providers.kyutai_candle.device",
+    "providers.kyutai_candle.download",
     "providers.pocket_tts.enabled",
     "providers.pocket_tts.model_dir",
     "providers.pocket_tts.model_id",
@@ -445,6 +456,13 @@ pub fn apply_environment_with(
         let v = env_usize(&get, "INFERENCE_STEPS", config.model.inference_steps)?;
         if get("INFERENCE_STEPS").is_some() {
             override_value(sources, "model.inference_steps");
+        }
+        v
+    };
+    config.model.backend = {
+        let v = env_string(&get, "MODEL_BACKEND", &config.model.backend)?;
+        if get("MODEL_BACKEND").is_some() {
+            override_value(sources, "model.backend");
         }
         v
     };

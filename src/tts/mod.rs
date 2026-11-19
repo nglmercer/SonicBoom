@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod backend;
 pub mod control;
 #[cfg(feature = "playback")]
 pub mod devices;
